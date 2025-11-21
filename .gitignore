@@ -1,0 +1,112 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+*.venv
+
+# Face embeddings
+face_embeddings/
+*.npy
+*.json
+
+# InsightFace models (se descargan automáticamente)
+.insightface/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Static files (si se generan)
+static/
+
+# Entorno virtual
+venv/
+.venv/
+env/
+ENV/
+*.venv/
+
+# Archivos compilados y cachés
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Configuración del editor/IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Entornos y dependencias empaquetadas
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# Archivos de entorno y secretos
+.env
+.env.*
+credentials.json
+
+# Datos / modelos / pesos (no commitear archivos grandes)
+data/
+datasets/
+models/
+weights/
+*.h5
+*.ckpt
+*.pt
+*.pth
+*.pb
+*.tflite
+
+# Logs y bases de datos locales
+*.log
+*.sqlite3
+*.db
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Cachés de pruebas / herramientas
+.pytest_cache/
+.mypy_cache/
+
+# Otros
+node_modules/
+
