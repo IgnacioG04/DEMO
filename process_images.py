@@ -1,16 +1,12 @@
-"""
-Script para procesar imágenes manualmente en registered_faces/
-Este script genera embeddings para imágenes que no tienen su .npy correspondiente
-"""
 import os
 import sys
 from pathlib import Path
 from deepface import DeepFace
 import numpy as np
+from database import Database
 
 def process_images_in_folder(folder_path="registered_faces"):
-    """Procesa todas las imágenes en la carpeta y genera embeddings"""
-    
+    # Check images against database and generate embeddings for new users
     faces_dir = Path(folder_path)
     
     if not faces_dir.exists():
@@ -26,15 +22,22 @@ def process_images_in_folder(folder_path="registered_faces"):
     print(f"\nBuscando imágenes en: {faces_dir.absolute()}")
     print()
     
-    # Extensiones de imagen soportadas
+    if not Database.test_connection():
+        print("[ERROR] No se pudo conectar a la base de datos. Verifica la configuración en .env")
+        return
+    
+    print("[OK] Conexión a base de datos establecida")
+    
+    existing_user_ids = Database.get_all_user_ids()
+    print(f"[INFO] Usuarios con embeddings en BD: {len(existing_user_ids)}")
+    print()
+    
     image_extensions = ['.jpg', '.jpeg', '.png', '.bmp']
     
-    # Contadores
     processed_count = 0
     skipped_count = 0
     error_count = 0
     
-    # Buscar todas las imágenes
     all_images = []
     for ext in image_extensions:
         all_images.extend(list(faces_dir.glob(f"*{ext}")))
@@ -47,21 +50,22 @@ def process_images_in_folder(folder_path="registered_faces"):
     print(f"[INFO] Se encontraron {len(all_images)} imagen(es).")
     print()
     
-    # Procesar cada imagen
     for image_file in all_images:
-        user_name = image_file.stem
-        embedding_file = faces_dir / f"{user_name}.npy"
+        try:
+            user_id = int(image_file.stem)
+        except ValueError:
+            print(f"[ERROR] {image_file.name} no tiene un user_id válido como nombre (debe ser numérico, ej: 1.png, 2.jpg)")
+            error_count += 1
+            continue
         
-        # Verificar si ya tiene embedding
-        if embedding_file.exists():
-            print(f"[SKIP] {image_file.name} ya tiene embedding ({embedding_file.name})")
+        if user_id in existing_user_ids:
+            print(f"[SKIP] {image_file.name} - user_id {user_id} ya tiene embedding en la base de datos")
             skipped_count += 1
             continue
         
-        print(f"[PROC] Procesando: {image_file.name}...")
+        print(f"[PROC] Procesando: {image_file.name} (user_id: {user_id})...")
         
         try:
-            # Generar embedding desde la imagen
             embedding_obj = DeepFace.represent(
                 img_path=str(image_file),
                 model_name='VGG-Face',
@@ -74,12 +78,16 @@ def process_images_in_folder(folder_path="registered_faces"):
                 error_count += 1
                 continue
             
-            # Guardar embedding
             embedding = np.array(embedding_obj[0]['embedding'])
-            np.save(embedding_file, embedding)
             
-            processed_count += 1
-            print(f"[OK] Embedding generado: {embedding_file.name}")
+            embedding_id = Database.insert_embedding(user_id, embedding)
+            
+            if embedding_id:
+                processed_count += 1
+                print(f"[OK] Embedding generado e insertado en BD (ID: {embedding_id}) para user_id {user_id}")
+            else:
+                print(f"[ERROR] No se pudo insertar embedding en BD para user_id {user_id}")
+                error_count += 1
             print()
             
         except Exception as e:
@@ -107,14 +115,14 @@ def process_images_in_folder(folder_path="registered_faces"):
             print("[WARN] Algunas imágenes tuvieron errores. Revisa los mensajes anteriores.")
 
 def main():
-    """Función principal"""
+    # Main entry point for image processing script
     print("\n" + "="*60)
     print("Script de procesamiento de imágenes")
     print("="*60)
     print("\nEste script procesa imágenes JPG/PNG en la carpeta 'registered_faces/'")
-    print("y genera los embeddings (.npy) necesarios para el reconocimiento facial.\n")
+    print("y genera los embeddings necesarios para el reconocimiento facial.")
+    print("Las imágenes deben nombrarse con su user_id (ej: 1.png, 2.jpg, etc.)\n")
     
-    # Permitir especificar carpeta como argumento
     folder_path = sys.argv[1] if len(sys.argv) > 1 else "registered_faces"
     
     try:

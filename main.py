@@ -1,6 +1,7 @@
 """
 API FastAPI para el sistema de reconocimiento facial
 """
+import os
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -19,6 +20,7 @@ static_dir.mkdir(exist_ok=True)
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
+    # Serve main HTML page with face recognition interface
     """Página principal con la interfaz web"""
     html_content = """
     <!DOCTYPE html>
@@ -310,21 +312,10 @@ async def read_root():
 
 @app.post("/register")
 async def register_face(file: UploadFile = File(...), user_id: str = Form(...)):
-    """
-    Endpoint para registrar un nuevo rostro
-    
-    Args:
-        file: Archivo de imagen con el rostro
-        user_id: ID único del usuario
-        
-    Returns:
-        Respuesta JSON con el resultado del registro
-    """
+    # API endpoint to register a new face embedding - Stateless: saves image to registered_faces, checks DB, processes and stores
     try:
-        # Leer bytes de la imagen
         image_bytes = await file.read()
         
-        # Registrar rostro
         success, message = face_system.register_face(image_bytes, user_id)
         
         if success:
@@ -342,20 +333,10 @@ async def register_face(file: UploadFile = File(...), user_id: str = Form(...)):
 
 @app.post("/login")
 async def login_face(file: UploadFile = File(...)):
-    """
-    Endpoint para verificar la identidad mediante reconocimiento facial
-    
-    Args:
-        file: Archivo de imagen con el rostro a verificar
-        
-    Returns:
-        Respuesta JSON con el resultado de la verificación
-    """
+    # API endpoint to verify face identity for login - Stateless: processes image, compares with DB, returns result
     try:
-        # Leer bytes de la imagen
         image_bytes = await file.read()
         
-        # Verificar rostro
         matches, user_id, similarity = face_system.verify_face(image_bytes)
         
         if matches:
@@ -377,6 +358,7 @@ async def login_face(file: UploadFile = File(...)):
 
 @app.get("/users")
 async def list_users():
+    # API endpoint to list all registered users
     """
     Endpoint para listar todos los usuarios registrados
     
@@ -389,27 +371,98 @@ async def list_users():
         "count": len(users)
     })
 
-@app.delete("/users/{user_id}")
-async def delete_user(user_id: str):
-    """
-    Endpoint para eliminar un usuario registrado
-    
-    Args:
-        user_id: ID del usuario a eliminar
+@app.post("/verify-frame")
+async def verify_frame(file: UploadFile = File(...)):
+    # API endpoint for real-time frame verification - Stateless: processes frame, compares with DB, returns all similarities
+    try:
+        image_bytes = await file.read()
         
-    Returns:
-        Confirmación de eliminación
-    """
-    success = face_system.delete_user(user_id)
-    
-    if success:
-        return JSONResponse({
-            "success": True,
-            "message": f"Usuario {user_id} eliminado correctamente"
-        })
-    else:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        temp_file = None
+        try:
+            from pathlib import Path
+            import uuid
+            temp_dir = Path("temp_images")
+            temp_dir.mkdir(exist_ok=True)
+            unique_id = str(uuid.uuid4())
+            temp_file = temp_dir / f"temp_verify_{unique_id}.jpg"
+            
+            with open(temp_file, 'wb') as f:
+                f.write(image_bytes)
+            
+            embedding = face_system._extract_face_embedding(str(temp_file))
+            
+            if embedding is None:
+                return JSONResponse({
+                    "success": False,
+                    "similarities": [],
+                    "message": "No se detectó rostro en la imagen"
+                })
+            
+            from database import Database
+            all_embeddings = Database.get_all_embeddings()
+            
+            similarities = []
+            for embedding_id, user_id, stored_embedding, created_at in all_embeddings:
+                similarity = face_system.calculate_similarity(embedding, stored_embedding)
+                similarities.append({
+                    "user_id": str(user_id),
+                    "similarity": float(similarity)
+                })
+            
+            similarities.sort(key=lambda x: x["similarity"], reverse=True)
+            
+            best_match = similarities[0] if similarities else None
+            other_similarities = similarities[1:] if len(similarities) > 1 else []
+            
+            return JSONResponse({
+                "success": True,
+                "best_match": best_match,
+                "all_similarities": similarities,
+                "other_similarities": other_similarities,
+                "threshold": float(face_system.threshold)
+            })
+            
+        finally:
+            if temp_file and temp_file.exists():
+                try:
+                    os.remove(temp_file)
+                except:
+                    pass
+                    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+
+def start_server():
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+
+def start_gui():
+    import time
+    time.sleep(2)
+    try:
+        from face_app_gui import FaceRecognitionApp
+        import tkinter as tk
+        
+        root = tk.Tk()
+        app = FaceRecognitionApp(root)
+        
+        def on_closing():
+            app.stop_camera()
+            root.destroy()
+        
+        root.protocol("WM_DELETE_WINDOW", on_closing)
+        root.mainloop()
+    except Exception as e:
+        print(f"[ERROR] No se pudo iniciar la GUI: {e}")
+        print("[INFO] El servidor API sigue ejecutándose en http://localhost:8000")
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import threading
+    
+    server_thread = threading.Thread(target=start_server, daemon=True)
+    server_thread.start()
+    
+    print("[INFO] Servidor API iniciando en http://localhost:8000")
+    print("[INFO] Abriendo aplicación GUI...")
+    
+    start_gui()
 

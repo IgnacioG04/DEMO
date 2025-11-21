@@ -3,14 +3,13 @@ Sistema de reconocimiento facial ligero y preciso
 Usa DeepFace para reconocimiento facial eficiente
 """
 import os
-import cv2
 import numpy as np
-import json
 import uuid
 import traceback
 from pathlib import Path
 from typing import Optional, Tuple
 from deepface import DeepFace
+from database import Database
 
 class FaceRecognitionSystem:
     """
@@ -19,26 +18,27 @@ class FaceRecognitionSystem:
     """
     
     def __init__(self, threshold: float = 0.6):
-        """
-        Inicializa el sistema de reconocimiento facial
-        
-        Args:
-            threshold: Umbral de similitud para reconocimiento (menor = más estricto)
-        """
+        # Initialize face recognition system with threshold and model configuration
         self.threshold = threshold
-        self.embeddings_dir = Path("face_embeddings")
-        self.embeddings_dir.mkdir(exist_ok=True)
+        self.registered_faces_dir = Path("registered_faces")
+        self.registered_faces_dir.mkdir(exist_ok=True)
         
-        # Configuración de DeepFace (modelo ligero)
-        self.backend = 'opencv'  # Más ligero que otros backends
-        self.model_name = 'VGG-Face'  # Modelo preciso y ligero
+        self.backend = 'opencv'
+        self.model_name = 'VGG-Face'
+        
+        if not Database.test_connection():
+            print("[WARN] No se pudo conectar a la base de datos. Verifica la configuración en .env")
+        else:
+            print("[OK] Conexión a base de datos establecida")
         
         print("[OK] Sistema de reconocimiento facial inicializado")
         print(f"[INFO] Umbral de similitud: {self.threshold:.2f}")
         print(f"[INFO] Backend: {self.backend}")
         print(f"[INFO] Modelo: {self.model_name}")
+        print(f"[INFO] Directorio de imágenes: {self.registered_faces_dir.absolute()}")
     
     def _save_image_temp(self, image_bytes: bytes) -> Optional[str]:
+        # Save image bytes to temporary file for processing
         """
         Guarda temporalmente la imagen para procesarla con DeepFace
         
@@ -72,6 +72,7 @@ class FaceRecognitionSystem:
             return None
     
     def _extract_face_embedding(self, image_path: str) -> Optional[np.ndarray]:
+        # Extract face embedding vector from image using DeepFace
         """
         Extrae el embedding facial de una imagen usando DeepFace
         
@@ -117,6 +118,7 @@ class FaceRecognitionSystem:
             return None
     
     def calculate_similarity(self, embedding1: np.ndarray, embedding2: np.ndarray) -> float:
+        # Calculate cosine similarity between two face embeddings
         """
         Calcula la similitud coseno entre dos embeddings
         
@@ -137,45 +139,41 @@ class FaceRecognitionSystem:
         return float(similarity)
     
     def register_face(self, image_bytes: bytes, user_id: str) -> Tuple[bool, str]:
-        """
-        Registra un nuevo rostro en el sistema
-        
-        Args:
-            image_bytes: Bytes de la imagen con el rostro
-            user_id: Identificador único del usuario
-            
-        Returns:
-            Tuple (éxito, mensaje)
-        """
-        temp_file = None
+        # Register new face: save image to registered_faces, check database, generate embedding, store in database
+        saved_image_path = None
         try:
-            # Validar que hay bytes
             if not image_bytes or len(image_bytes) == 0:
                 return False, "La imagen está vacía"
             
-            # Guardar imagen temporalmente
-            temp_file = self._save_image_temp(image_bytes)
-            if temp_file is None:
-                return False, "Error al procesar la imagen. Verifica que sea un formato válido (JPG, PNG, etc.)"
+            try:
+                user_id_int = int(user_id)
+            except ValueError:
+                return False, "user_id debe ser un número entero"
             
-            # Extraer embedding
-            embedding = self._extract_face_embedding(temp_file)
+            saved_image_path = self.registered_faces_dir / f"{user_id}.jpg"
+            if saved_image_path.exists():
+                return False, f"El usuario {user_id} ya tiene una imagen en registered_faces"
+            
+            with open(saved_image_path, 'wb') as f:
+                f.write(image_bytes)
+            
+            if Database.user_has_embeddings(user_id_int):
+                if saved_image_path.exists():
+                    saved_image_path.unlink()
+                return False, f"El usuario {user_id} ya tiene embeddings registrados en la base de datos"
+            
+            embedding = self._extract_face_embedding(str(saved_image_path))
             if embedding is None:
+                if saved_image_path.exists():
+                    saved_image_path.unlink()
                 return False, "No se detectó ningún rostro en la imagen. Asegúrate de que el rostro esté claramente visible y de frente"
             
-            # Guardar embedding
-            embedding_file = self.embeddings_dir / f"{user_id}.npy"
-            np.save(embedding_file, embedding)
+            embedding_id = Database.insert_embedding(user_id_int, embedding)
             
-            # Guardar metadatos
-            metadata_file = self.embeddings_dir / f"{user_id}.json"
-            metadata = {
-                "user_id": user_id,
-                "model": self.model_name,
-                "backend": self.backend
-            }
-            with open(metadata_file, 'w', encoding='utf-8') as f:
-                json.dump(metadata, f, ensure_ascii=False)
+            if embedding_id is None:
+                if saved_image_path.exists():
+                    saved_image_path.unlink()
+                return False, "Error al insertar embedding en la base de datos"
             
             return True, f"Rostro registrado correctamente para {user_id}"
             
@@ -183,16 +181,15 @@ class FaceRecognitionSystem:
             error_msg = str(e)
             print(f"[ERROR] Error al registrar rostro: {error_msg}")
             traceback.print_exc()
-            return False, f"Error al registrar rostro: {error_msg}"
-        finally:
-            # Limpiar archivo temporal
-            if temp_file and os.path.exists(temp_file):
+            if saved_image_path and saved_image_path.exists():
                 try:
-                    os.remove(temp_file)
-                except Exception as cleanup_error:
-                    print(f"[WARN] No se pudo eliminar archivo temporal: {cleanup_error}")
+                    saved_image_path.unlink()
+                except:
+                    pass
+            return False, f"Error al registrar rostro: {error_msg}"
     
     def verify_face(self, image_bytes: bytes) -> Tuple[bool, Optional[str], float]:
+        # Verify face by comparing with stored embeddings and return match result
         """
         Verifica si el rostro coincide con alguno de los registrados
         
@@ -214,23 +211,19 @@ class FaceRecognitionSystem:
             if embedding is None:
                 return False, None, 0.0
             
-            # Buscar entre los rostros registrados
+            # Buscar entre los rostros registrados en la base de datos
             best_match = None
             best_similarity = 0.0
             
-            for embedding_file in self.embeddings_dir.glob("*.npy"):
-                if embedding_file.stem.endswith('.json'):
-                    continue
-                
-                # Cargar embedding registrado
-                stored_embedding = np.load(embedding_file)
-                
+            all_embeddings = Database.get_all_embeddings()
+            
+            for embedding_id, user_id, stored_embedding, created_at in all_embeddings:
                 # Calcular similitud
                 similarity = self.calculate_similarity(embedding, stored_embedding)
                 
                 if similarity > best_similarity:
                     best_similarity = similarity
-                    best_match = embedding_file.stem
+                    best_match = str(user_id)
             
             # Verificar si supera el umbral
             if best_similarity >= self.threshold:
@@ -252,39 +245,12 @@ class FaceRecognitionSystem:
                     print(f"[WARN] No se pudo eliminar archivo temporal: {cleanup_error}")
     
     def list_registered_users(self) -> list:
+        # List all registered user IDs from database
         """
         Lista todos los usuarios registrados
         
         Returns:
             Lista de IDs de usuarios registrados
         """
-        users = []
-        for embedding_file in self.embeddings_dir.glob("*.npy"):
-            if embedding_file.stem.endswith('.json'):
-                continue
-            users.append(embedding_file.stem)
-        return users
-    
-    def delete_user(self, user_id: str) -> bool:
-        """
-        Elimina un usuario del sistema
-        
-        Args:
-            user_id: ID del usuario a eliminar
-            
-        Returns:
-            True si se eliminó correctamente
-        """
-        try:
-            embedding_file = self.embeddings_dir / f"{user_id}.npy"
-            metadata_file = self.embeddings_dir / f"{user_id}.json"
-            
-            if embedding_file.exists():
-                embedding_file.unlink()
-            if metadata_file.exists():
-                metadata_file.unlink()
-            
-            return True
-        except Exception as e:
-            print(f"Error al eliminar usuario: {e}")
-            return False
+        user_ids = Database.get_all_user_ids()
+        return sorted([str(user_id) for user_id in user_ids])
