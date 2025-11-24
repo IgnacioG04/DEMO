@@ -4,15 +4,22 @@ import requests
 import sys
 import uvicorn
 from face_app_gui import main as gui_main
+import os
+from dotenv import load_dotenv
 
-API_PORT = 8000
-API_HOST = "0.0.0.0"
-API_URL = f"http://localhost:{API_PORT}"
+# Load environment variables from .env file
+load_dotenv()
+
+API_PORT = int(os.getenv('API_PORT', 8000))
+API_HOST = os.getenv('API_HOST', '0.0.0.0')
+API_URL = f"http://{API_HOST}:{API_PORT}"
 
 def check_server_ready(max_attempts=30, delay=0.5):
+    # Use localhost for checking, even if API_HOST is 0.0.0.0
+    check_url = f"http://{API_HOST}:{API_PORT}"
     for i in range(max_attempts):
         try:
-            response = requests.get(f"{API_URL}/users", timeout=1)
+            response = requests.get(f"{check_url}/users", timeout=1)
             if response.status_code in [200, 401, 404]:
                 return True
         except:
@@ -45,13 +52,28 @@ def main():
         print("❌ Error: No se pudo iniciar el servidor")
         sys.exit(1)
     
-    print(f"✅ Servidor API iniciado en http://localhost:{API_PORT}")
+    print(f"✅ Servidor API iniciado en http://{API_HOST}:{API_PORT}")
     print("🖥️  Iniciando aplicación GUI...")
     print("=" * 60)
     print("\n")
     
     try:
         gui_main()
+        # GUI closed, but server continues running
+        print("\n" + "=" * 60)
+        print("🖥️  Ventana GUI cerrada")
+        print(f"✅ Servidor API sigue ejecutándose en http://{API_HOST}:{API_PORT}")
+        print("📱 Accede a la API web en el navegador")
+        print("⏹️  Presiona Ctrl+C para detener el servidor")
+        print("=" * 60 + "\n")
+        
+        # Keep the main thread alive so the server continues running
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\n\n⏹️  Servidor detenido por el usuario")
+            sys.exit(0)
     except KeyboardInterrupt:
         print("\n\n⏹️  Aplicación cerrada por el usuario")
         sys.exit(0)

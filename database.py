@@ -66,7 +66,7 @@ class Database:
             embedding_bytes = embedding_float32.tobytes()
             
             query = """
-                INSERT INTO usuarios_face_embeddings (usuario_id, embedding)
+                INSERT INTO usuarios_face_embeddings (id_usuario, embedding)
                 VALUES (%s, %s)
             """
             
@@ -98,7 +98,7 @@ class Database:
             query = """
                 SELECT id_usuarios_face_embeddings, embedding, creado_en
                 FROM usuarios_face_embeddings
-                WHERE usuario_id = %s
+                WHERE id_usuario = %s
             """
             
             cursor.execute(query, (user_id,))
@@ -129,7 +129,7 @@ class Database:
             cursor = conn.cursor()
             
             query = """
-                SELECT id_usuarios_face_embeddings, usuario_id, embedding, creado_en
+                SELECT id_usuarios_face_embeddings, id_usuario, embedding, creado_en
                 FROM usuarios_face_embeddings
             """
             
@@ -137,9 +137,9 @@ class Database:
             rows = cursor.fetchall()
             
             for row in rows:
-                embedding_id, usuario_id, embedding_bytes, creado_en = row
+                embedding_id, id_usuario, embedding_bytes, creado_en = row
                 embedding = np.frombuffer(embedding_bytes, dtype=np.float32)
-                results.append((embedding_id, usuario_id, embedding, creado_en))
+                results.append((embedding_id, id_usuario, embedding, creado_en))
             
             return results
             
@@ -159,7 +159,7 @@ class Database:
             conn = cls.get_connection()
             cursor = conn.cursor()
             
-            query = "SELECT COUNT(*) FROM usuarios_face_embeddings WHERE usuario_id = %s"
+            query = "SELECT COUNT(*) FROM usuarios_face_embeddings WHERE id_usuario = %s"
             cursor.execute(query, (user_id,))
             count = cursor.fetchone()[0]
             
@@ -181,7 +181,7 @@ class Database:
             conn = cls.get_connection()
             cursor = conn.cursor()
             
-            query = "SELECT DISTINCT usuario_id FROM usuarios_face_embeddings"
+            query = "SELECT DISTINCT id_usuario FROM usuarios_face_embeddings"
             cursor.execute(query)
             rows = cursor.fetchall()
             

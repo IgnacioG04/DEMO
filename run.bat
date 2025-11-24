@@ -17,7 +17,7 @@ call venv\Scripts\activate.bat
 
 REM Iniciar servidor
 echo Iniciando servidor...
-echo Accede a: http://localhost:8000
+echo Accede a: http://%API_HOST%:%API_PORT%
 echo.
 python run.py
 

@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import Optional, Tuple
 from deepface import DeepFace
 from database import Database
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 class FaceRecognitionSystem:
     """
@@ -17,8 +21,11 @@ class FaceRecognitionSystem:
     Optimizado para ser ligero y preciso
     """
     
-    def __init__(self, threshold: float = 0.6):
+    def __init__(self, threshold: float = None):
         # Initialize face recognition system with threshold and model configuration
+        # Load threshold from environment variable CONFIDENCE_INTERVAL, default to 0.8
+        if threshold is None:
+            threshold = float(os.getenv('CONFIDENCE_INTERVAL', '0.8'))
         self.threshold = threshold
         self.registered_faces_dir = Path("registered_faces")
         self.registered_faces_dir.mkdir(exist_ok=True)
