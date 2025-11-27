@@ -66,11 +66,11 @@ class Database:
             embedding_bytes = embedding_float32.tobytes()
             
             query = """
-                INSERT INTO usuarios_face_embeddings (id_usuario, embedding)
-                VALUES (%s, %s)
+                INSERT INTO usuarios_face_embeddings (id_usuario, embedding, estado)
+                VALUES (%s, %s, %s)
             """
             
-            cursor.execute(query, (user_id, embedding_bytes))
+            cursor.execute(query, (user_id, embedding_bytes, 1))
             conn.commit()
             
             embedding_id = cursor.lastrowid
@@ -87,7 +87,7 @@ class Database:
                 conn.close()
     
     @classmethod
-    def get_embeddings_by_user(cls, user_id: int) -> List[Tuple[int, np.ndarray, datetime]]:
+    def get_embeddings_by_user(cls, user_id: int) -> List[Tuple[int, np.ndarray, datetime, bool]]:
         # Retrieve all embeddings for a specific user from database
         conn = None
         results = []
@@ -96,7 +96,7 @@ class Database:
             cursor = conn.cursor()
             
             query = """
-                SELECT id_usuarios_face_embeddings, embedding, creado_en
+                SELECT id_usuario_face_embedding, embedding, creado_en, estado
                 FROM usuarios_face_embeddings
                 WHERE id_usuario = %s
             """
@@ -105,9 +105,9 @@ class Database:
             rows = cursor.fetchall()
             
             for row in rows:
-                embedding_id, embedding_bytes, creado_en = row
+                embedding_id, embedding_bytes, creado_en, estado = row
                 embedding = np.frombuffer(embedding_bytes, dtype=np.float32)
-                results.append((embedding_id, embedding, creado_en))
+                results.append((embedding_id, embedding, creado_en, bool(estado)))
             
             return results
             
@@ -120,7 +120,7 @@ class Database:
                 conn.close()
     
     @classmethod
-    def get_all_embeddings(cls) -> List[Tuple[int, int, np.ndarray, datetime]]:
+    def get_all_embeddings(cls) -> List[Tuple[int, int, np.ndarray, datetime, bool]]:
         # Retrieve all embeddings from database for face comparison
         conn = None
         results = []
@@ -129,7 +129,7 @@ class Database:
             cursor = conn.cursor()
             
             query = """
-                SELECT id_usuarios_face_embeddings, id_usuario, embedding, creado_en
+                SELECT id_usuario_face_embedding, id_usuario, embedding, creado_en, estado
                 FROM usuarios_face_embeddings
             """
             
@@ -137,9 +137,9 @@ class Database:
             rows = cursor.fetchall()
             
             for row in rows:
-                embedding_id, id_usuario, embedding_bytes, creado_en = row
+                embedding_id, id_usuario, embedding_bytes, creado_en, estado = row
                 embedding = np.frombuffer(embedding_bytes, dtype=np.float32)
-                results.append((embedding_id, id_usuario, embedding, creado_en))
+                results.append((embedding_id, id_usuario, embedding, creado_en, bool(estado)))
             
             return results
             

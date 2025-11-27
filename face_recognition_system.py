@@ -224,7 +224,11 @@ class FaceRecognitionSystem:
             
             all_embeddings = Database.get_all_embeddings()
             
-            for embedding_id, user_id, stored_embedding, created_at in all_embeddings:
+            for embedding_id, user_id, stored_embedding, created_at, estado in all_embeddings:
+                # Solo procesar embeddings con estado activo (True)
+                if not estado:
+                    continue
+                
                 # Calcular similitud
                 similarity = self.calculate_similarity(embedding, stored_embedding)
                 

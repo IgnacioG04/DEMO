@@ -128,7 +128,11 @@ async def verify_frame(file: UploadFile = File(...)):
             all_embeddings = Database.get_all_embeddings()
             
             similarities = []
-            for embedding_id, user_id, stored_embedding, created_at in all_embeddings:
+            for embedding_id, user_id, stored_embedding, created_at, estado in all_embeddings:
+                # Solo procesar embeddings con estado activo (True)
+                if not estado:
+                    continue
+                
                 similarity = face_system.calculate_similarity(embedding, stored_embedding)
                 similarities.append({
                     "user_id": str(user_id),
