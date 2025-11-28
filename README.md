@@ -113,11 +113,12 @@ Ejecuta el siguiente SQL en tu base de datos:
 
 ```sql
 CREATE TABLE usuarios_face_embeddings (
-    id_usuarios_face_embeddings INT AUTO_INCREMENT PRIMARY KEY,
-    usuario_id INT NOT NULL,
+    id_usuario_face_embedding INT AUTO_INCREMENT PRIMARY KEY,
+    id_usuario INT NOT NULL,
     embedding LONGBLOB NOT NULL,
     creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (usuario_id) REFERENCES usuarios(id_usuario)
+    estado TINYINT DEFAULT 1,
+    FOREIGN KEY (id_usuario) REFERENCES usuarios(id_usuario)
 );
 ```
 
@@ -468,6 +469,7 @@ Los embeddings se almacenan en la tabla `usuarios_face_embeddings`:
 - **`usuario_id`**: ID del usuario (INT, puede tener múltiples embeddings)
 - **`embedding`**: Vector de características faciales (LONGBLOB)
 - **`creado_en`**: Fecha y hora de creación (TIMESTAMP con DEFAULT CURRENT_TIMESTAMP)
+- **`estado`**: Estado del registro (TINYINT, DEFAULT 1 - activo/true). Se establece automáticamente en 1 (true) cuando el usuario es registrado
 
 **Ventajas**:
 

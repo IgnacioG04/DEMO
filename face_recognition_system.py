@@ -228,7 +228,7 @@ class FaceRecognitionSystem:
     def calculate_similarities_vectorized(
         self, 
         query_embedding: np.ndarray, 
-        all_embeddings: List[Tuple[int, int, np.ndarray, datetime]]
+        all_embeddings: List[Tuple[int, int, np.ndarray, datetime, bool]]
     ) -> Tuple[np.ndarray, List[str]]:
         """
         Calcula similitudes con todos los embeddings usando vectorización NumPy
@@ -237,7 +237,7 @@ class FaceRecognitionSystem:
         Args:
             query_embedding: Embedding de la imagen a comparar
             all_embeddings: Lista de todos los embeddings almacenados
-                Formato: [(embedding_id, user_id, embedding, created_at), ...]
+                Formato: [(embedding_id, user_id, embedding, created_at, estado), ...]
         
         Returns:
             Tuple (array de similitudes, lista de user_ids)
@@ -255,7 +255,10 @@ class FaceRecognitionSystem:
             embeddings_list = []
             user_ids_list = []
             
-            for embedding_id, user_id, embedding, created_at in all_embeddings:
+            for embedding_id, user_id, embedding, created_at, estado in all_embeddings:
+                # Solo procesar embeddings con estado activo (True)
+                if not estado:
+                    continue
                 # Asegurar que cada embedding es un array NumPy 1D
                 embedding_array = np.asarray(embedding, dtype=np.float32).flatten()
                 
@@ -413,6 +416,7 @@ class FaceRecognitionSystem:
                 return False, None, 0.0
             
             # Calcular similitudes con todos los embeddings simultáneamente usando vectorización
+            # calculate_similarities_vectorized ya filtra por estado activo internamente
             similarities, user_ids = self.calculate_similarities_vectorized(embedding, all_embeddings)
             
             if len(similarities) == 0:

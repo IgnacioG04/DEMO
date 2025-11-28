@@ -40,12 +40,12 @@ class EmbeddingsCache:
         self.cache = TTLCache(maxsize=maxsize, ttl=ttl)
         logger.info(f"Caché de embeddings inicializado (TTL: {ttl}s)")
     
-    def get_all_embeddings(self) -> List[Tuple[int, int, np.ndarray, datetime]]:
+    def get_all_embeddings(self) -> List[Tuple[int, int, np.ndarray, datetime, bool]]:
         """
         Obtiene todos los embeddings usando patrón Cache-Aside
         
         Returns:
-            Lista de embeddings: (embedding_id, user_id, embedding, created_at)
+            Lista de embeddings: (embedding_id, user_id, embedding, created_at, estado)
         """
         # 1. Intentar obtener del caché
         cached_embeddings = self.cache.get(CACHE_KEY)
@@ -121,12 +121,12 @@ def get_embeddings_cache() -> EmbeddingsCache:
     return _embeddings_cache_instance
 
 
-def get_all_embeddings_with_cache() -> List[Tuple[int, int, np.ndarray, datetime]]:
+def get_all_embeddings_with_cache() -> List[Tuple[int, int, np.ndarray, datetime, bool]]:
     """
     Función helper para obtener embeddings usando caché
     
     Returns:
-        Lista de embeddings
+        Lista de embeddings: (embedding_id, user_id, embedding, created_at, estado)
     """
     cache = get_embeddings_cache()
     return cache.get_all_embeddings()
