@@ -66,11 +66,39 @@ def process_images_in_folder(folder_path="registered_faces"):
         print(f"[PROC] Procesando: {image_file.name} (user_id: {user_id})...")
         
         try:
+            # Usar configuración optimizada (misma que face_recognition_system)
+            # Intentar RetinaFace primero, luego MTCNN, luego opencv como fallback
+            backend = 'opencv'  # Por defecto
+            model = 'VGG-Face'  # Por defecto
+            
+            try:
+                import retinaface
+                backend = 'retinaface'  # DeepFace espera minúsculas
+                print(f"  [INFO] Usando detector: RetinaFace")
+            except:
+                try:
+                    DeepFace.build_model('MTCNN')
+                    backend = 'mtcnn'
+                    print(f"  [INFO] Usando detector: MTCNN")
+                except:
+                    backend = 'opencv'
+                    print(f"  [INFO] Usando detector: opencv (fallback)")
+            
+            try:
+                DeepFace.build_model('ArcFace')
+                model = 'ArcFace'
+                print(f"  [INFO] Usando modelo: ArcFace")
+            except:
+                model = 'VGG-Face'
+                print(f"  [INFO] Usando modelo: VGG-Face")
+            
             embedding_obj = DeepFace.represent(
                 img_path=str(image_file),
-                model_name='VGG-Face',
-                detector_backend='opencv',
-                enforce_detection=False
+                model_name=model,
+                detector_backend=backend,
+                align=True,  # Alineación facial para corregir poses
+                enforce_detection=True,  # Requiere rostro válido
+                normalization='base'
             )
             
             if len(embedding_obj) == 0:
@@ -78,9 +106,12 @@ def process_images_in_folder(folder_path="registered_faces"):
                 error_count += 1
                 continue
             
+            # Extraer y normalizar embedding (mismo proceso que en face_recognition_system)
             embedding = np.array(embedding_obj[0]['embedding'])
+            # Normalizar para similitud coseno consistente
+            embedding_norm = embedding / (np.linalg.norm(embedding) + 1e-10)
             
-            embedding_id = Database.insert_embedding(user_id, embedding)
+            embedding_id = Database.insert_embedding(user_id, embedding_norm)
             
             if embedding_id:
                 processed_count += 1

@@ -79,8 +79,23 @@ class Database:
         except Error as e:
             if conn:
                 conn.rollback()
+            error_msg = str(e)
+            # Detectar errores específicos de MySQL
+            error_code = e.errno if hasattr(e, 'errno') else None
+            
+            # Error 1452: Cannot add or update a child row: foreign key constraint fails
+            # El usuario no existe en la tabla usuarios
+            if error_code == 1452 or "foreign key constraint" in error_msg.lower():
+                from exceptions import UserNotFoundError
+                raise UserNotFoundError(
+                    str(user_id),
+                    f"El usuario {user_id} no existe en la tabla 'usuarios'. Debe existir antes de registrar embeddings."
+                )
+            
+            # Otros errores de BD
             print(f"Error inserting embedding: {e}")
-            return None
+            from exceptions import DatabaseError
+            raise DatabaseError(f"Error al insertar embedding: {error_msg}")
         finally:
             if conn and conn.is_connected():
                 cursor.close()
@@ -138,8 +153,19 @@ class Database:
             
             for row in rows:
                 embedding_id, id_usuario, embedding_bytes, creado_en = row
-                embedding = np.frombuffer(embedding_bytes, dtype=np.float32)
-                results.append((embedding_id, id_usuario, embedding, creado_en))
+                try:
+                    # Convertir bytes a array NumPy
+                    embedding = np.frombuffer(embedding_bytes, dtype=np.float32).copy()
+                    # Asegurar que es un array 1D
+                    embedding = embedding.flatten()
+                    # Validar que no esté vacío
+                    if embedding.size == 0:
+                        print(f"[WARNING] Embedding vacío para usuario {id_usuario} (ID: {embedding_id})")
+                        continue
+                    results.append((embedding_id, id_usuario, embedding, creado_en))
+                except Exception as e:
+                    print(f"[ERROR] Error al procesar embedding para usuario {id_usuario} (ID: {embedding_id}): {e}")
+                    continue
             
             return results
             

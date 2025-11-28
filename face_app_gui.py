@@ -37,6 +37,31 @@ class FaceRecognitionApp:
         self.last_detection_time = {}
         self.access_granted = False  # Flag to prevent multiple access grants
         
+        # Optimizaciones para login: throttling y procesamiento asíncrono
+        self.processing_request = False  # Flag para evitar requests simultáneos
+        self.last_request_time = 0  # Timestamp del último request
+        self.request_interval = 0.8  # Intervalo entre requests en segundos (800ms)
+        self.face_cascade = None  # Clasificador para detección previa local
+        
+        # Área guía para posicionar el rostro (para recorte consistente)
+        # Define una región central del frame donde el usuario debe posicionar su rostro
+        # Aumentamos el tamaño de la ROI para dar más contexto a DeepFace
+        self.face_roi_center_x = 0.5  # 50% desde la izquierda (centro horizontal)
+        self.face_roi_center_y = 0.45  # 45% desde arriba (centro vertical, ligeramente arriba)
+        self.face_roi_width_ratio = 0.6  # 60% del ancho del frame (aumentado de 40%)
+        self.face_roi_height_ratio = 0.7  # 70% del alto del frame (aumentado de 50%)
+        
+        # Cargar clasificador de OpenCV para detección previa local (opcional pero útil)
+        try:
+            cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+            self.face_cascade = cv2.CascadeClassifier(cascade_path)
+            if self.face_cascade.empty():
+                print("[WARN] No se pudo cargar el clasificador de OpenCV, se desactivará detección previa")
+                self.face_cascade = None
+        except Exception as e:
+            print(f"[WARN] Error al cargar clasificador OpenCV: {e}")
+            self.face_cascade = None
+        
         self.check_api_connection()
         self.setup_ui()
     
@@ -232,6 +257,8 @@ class FaceRecognitionApp:
         self.detection_count = {}
         self.last_detection_time = {}
         self.access_granted = False  # Reset access granted flag
+        self.processing_request = False  # Reset processing flag
+        self.last_request_time = 0  # Reset last request time
         self.status_label.config(text="Modo: LOGIN - Detectando rostro...", fg='#2196F3')
         threshold_percent = int(self.threshold * 100)
         self.info_label.config(text=f"Usuarios registrados: {len(registered_users)} | Umbral mínimo: {threshold_percent}%")
@@ -320,6 +347,8 @@ class FaceRecognitionApp:
         self.access_granted = False
         self.detection_count = {}
         self.last_detection_time = {}
+        self.processing_request = False  # Reset processing flag
+        self.last_request_time = 0  # Reset last request time
         
         # Reset UI to initial state
         self.video_label.config(
@@ -367,14 +396,26 @@ class FaceRecognitionApp:
             self.camera.release()
             self.camera = None
         
-        self.register_btn.config(state=NORMAL)
-        self.login_btn.config(state=NORMAL)
-        self.capture_btn.config(state=DISABLED)
-        self.capture_btn.pack_forget()  # Hide button when returning to main
+        # Solo actualizar widgets si tkinter aún está disponible
+        try:
+            if hasattr(self, 'root') and self.root and self.root.winfo_exists():
+                if hasattr(self, 'register_btn'):
+                    self.register_btn.config(state=NORMAL)
+                if hasattr(self, 'login_btn'):
+                    self.login_btn.config(state=NORMAL)
+                if hasattr(self, 'capture_btn'):
+                    self.capture_btn.config(state=DISABLED)
+                    self.capture_btn.pack_forget()  # Hide button when returning to main
+                
+                if hasattr(self, 'video_label'):
+                    self.video_label.config(image='', text="Cámara detenida")
+                if hasattr(self, 'status_label'):
+                    self.status_label.config(text="Estado: Esperando acción...", fg='#666')
+                if hasattr(self, 'info_label'):
+                    self.info_label.config(text="")
+        except:
+            pass  # Ignorar errores si tkinter ya fue destruido
         
-        self.video_label.config(image='', text="Cámara detenida")
-        self.status_label.config(text="Estado: Esperando acción...", fg='#666')
-        self.info_label.config(text="")
         self.current_mode = None
         self.current_user_id = None
         self.last_frame = None
@@ -406,44 +447,292 @@ class FaceRecognitionApp:
             
             time.sleep(0.03)
     
+    def draw_face_guide_region(self, frame):
+        """
+        Dibuja una región guía en el frame donde el usuario debe posicionar su rostro.
+        Esto ayuda al usuario a saber dónde debe estar su rostro para mejor reconocimiento.
+        """
+        height, width = frame.shape[:2]
+        
+        # Calcular coordenadas de la región de interés (ROI)
+        roi_x = int(width * (self.face_roi_center_x - self.face_roi_width_ratio / 2))
+        roi_y = int(height * (self.face_roi_center_y - self.face_roi_height_ratio / 2))
+        roi_width = int(width * self.face_roi_width_ratio)
+        roi_height = int(height * self.face_roi_height_ratio)
+        
+        # Dibujar rectángulo guía (verde si está dentro, amarillo si no)
+        color = (0, 255, 0)  # Verde por defecto
+        
+        # Verificar si hay rostro en esa región
+        roi_frame = frame[roi_y:roi_y+roi_height, roi_x:roi_x+roi_width]
+        has_face_in_roi = self._check_face_in_roi(roi_frame)
+        
+        if not has_face_in_roi:
+            color = (0, 165, 255)  # Naranja si no hay rostro en la región
+        
+        # Dibujar rectángulo externo
+        cv2.rectangle(frame, (roi_x, roi_y), (roi_x + roi_width, roi_y + roi_height), color, 2)
+        
+        # Dibujar rectángulo interno (más delgado)
+        margin = 10
+        cv2.rectangle(frame, 
+                     (roi_x + margin, roi_y + margin), 
+                     (roi_x + roi_width - margin, roi_y + roi_height - margin), 
+                     color, 1)
+        
+        # Dibujar líneas de guía en el centro
+        center_x = roi_x + roi_width // 2
+        center_y = roi_y + roi_height // 2
+        line_length = 30
+        
+        # Línea horizontal
+        cv2.line(frame, (center_x - line_length, center_y), (center_x + line_length, center_y), color, 2)
+        # Línea vertical
+        cv2.line(frame, (center_x, center_y - line_length), (center_x, center_y + line_length), color, 2)
+        
+        return roi_x, roi_y, roi_width, roi_height
+    
+    def _check_face_in_roi(self, roi_frame) -> bool:
+        """
+        Verifica si hay un rostro en la región de interés recortada.
+        """
+        if self.face_cascade is None or roi_frame.size == 0:
+            return False
+        
+        try:
+            if len(roi_frame.shape) == 3:
+                gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = roi_frame
+            
+            faces = self.face_cascade.detectMultiScale(
+                gray,
+                scaleFactor=1.1,
+                minNeighbors=3,
+                minSize=(30, 30)
+            )
+            return len(faces) > 0
+        except Exception as e:
+            return False
+    
+    def extract_face_from_roi(self, frame) -> Optional[np.ndarray]:
+        """
+        Extrae y recorta solo el rostro de la región de interés (ROI).
+        Retorna el frame recortado con solo el rostro, o None si no se detecta.
+        
+        Esto asegura que siempre procesemos solo el rostro, eliminando el fondo variable.
+        """
+        height, width = frame.shape[:2]
+        
+        # Calcular coordenadas de la región de interés
+        roi_x = int(width * (self.face_roi_center_x - self.face_roi_width_ratio / 2))
+        roi_y = int(height * (self.face_roi_center_y - self.face_roi_height_ratio / 2))
+        roi_width = int(width * self.face_roi_width_ratio)
+        roi_height = int(height * self.face_roi_height_ratio)
+        
+        # Asegurar que las coordenadas estén dentro del frame
+        roi_x = max(0, roi_x)
+        roi_y = max(0, roi_y)
+        roi_width = min(roi_width, width - roi_x)
+        roi_height = min(roi_height, height - roi_y)
+        
+        # Recortar la región de interés
+        roi_frame = frame[roi_y:roi_y+roi_height, roi_x:roi_x+roi_width].copy()
+        
+        if roi_frame.size == 0:
+            return None
+        
+        # Detectar rostro dentro de la ROI
+        if self.face_cascade is None:
+            # Si no hay clasificador, devolver la ROI completa
+            # Asegurar tamaño mínimo para DeepFace
+            min_size = 224
+            if roi_frame.shape[0] < min_size or roi_frame.shape[1] < min_size:
+                scale = min_size / min(roi_frame.shape[0], roi_frame.shape[1])
+                new_width = int(roi_frame.shape[1] * scale)
+                new_height = int(roi_frame.shape[0] * scale)
+                roi_frame = cv2.resize(roi_frame, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
+            return roi_frame
+        
+        try:
+            gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
+            faces = self.face_cascade.detectMultiScale(
+                gray,
+                scaleFactor=1.1,
+                minNeighbors=3,
+                minSize=(30, 30)
+            )
+            
+            if len(faces) == 0:
+                # Si no se detecta rostro con Haar Cascade, devolver la ROI completa
+                # DeepFace (RetinaFace) es más robusto y puede detectarlo mejor
+                # Redimensionar si es muy pequeña
+                min_size = 224
+                if roi_frame.shape[0] < min_size or roi_frame.shape[1] < min_size:
+                    scale = min_size / min(roi_frame.shape[0], roi_frame.shape[1])
+                    new_width = int(roi_frame.shape[1] * scale)
+                    new_height = int(roi_frame.shape[0] * scale)
+                    roi_frame = cv2.resize(roi_frame, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
+                return roi_frame
+            
+            # Tomar el rostro más grande (probablemente el más cercano)
+            largest_face = max(faces, key=lambda f: f[2] * f[3])
+            x, y, w, h = largest_face
+            
+            # Agregar padding generoso alrededor del rostro (50% en cada lado para más contexto)
+            # Esto da más contexto a DeepFace y mejora la detección
+            padding = int(min(w, h) * 0.5)
+            x = max(0, x - padding)
+            y = max(0, y - padding)
+            w = min(roi_width - x, w + 2 * padding)
+            h = min(roi_height - y, h + 2 * padding)
+            
+            # Recortar el rostro con padding generoso
+            face_crop = roi_frame[y:y+h, x:x+w]
+            
+            # Asegurar tamaño mínimo adecuado para DeepFace (mínimo 224x224 para mejor detección)
+            min_size = 224
+            if face_crop.shape[0] < min_size or face_crop.shape[1] < min_size:
+                scale = min_size / min(face_crop.shape[0], face_crop.shape[1])
+                new_width = int(face_crop.shape[1] * scale)
+                new_height = int(face_crop.shape[0] * scale)
+                face_crop = cv2.resize(face_crop, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
+            
+            return face_crop
+            
+        except Exception as e:
+            print(f"[DEBUG] Error al extraer rostro de ROI: {e}")
+            # En caso de error, devolver la ROI completa (DeepFace lo intentará detectar)
+            # Asegurar tamaño mínimo
+            min_size = 224
+            if roi_frame.shape[0] < min_size or roi_frame.shape[1] < min_size:
+                scale = min_size / min(roi_frame.shape[0], roi_frame.shape[1])
+                new_width = int(roi_frame.shape[1] * scale)
+                new_height = int(roi_frame.shape[0] * scale)
+                roi_frame = cv2.resize(roi_frame, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
+            return roi_frame
+    
+    def has_face_in_frame(self, frame) -> bool:
+        """
+        Detección previa local usando OpenCV para verificar si hay un rostro en el frame.
+        Esto evita enviar frames sin rostro al servidor, ahorrando requests innecesarios.
+        Ahora verifica solo la región de interés (ROI) guía.
+        """
+        if self.face_cascade is None:
+            # Si no hay clasificador, retornar True para no bloquear el flujo
+            return True
+        
+        try:
+            # Verificar solo en la región de interés
+            height, width = frame.shape[:2]
+            roi_x = int(width * (self.face_roi_center_x - self.face_roi_width_ratio / 2))
+            roi_y = int(height * (self.face_roi_center_y - self.face_roi_height_ratio / 2))
+            roi_width = int(width * self.face_roi_width_ratio)
+            roi_height = int(height * self.face_roi_height_ratio)
+            
+            # Asegurar coordenadas válidas
+            roi_x = max(0, roi_x)
+            roi_y = max(0, roi_y)
+            roi_width = min(roi_width, width - roi_x)
+            roi_height = min(roi_height, height - roi_y)
+            
+            roi_frame = frame[roi_y:roi_y+roi_height, roi_x:roi_x+roi_width]
+            
+            if roi_frame.size == 0:
+                return False
+            
+            return self._check_face_in_roi(roi_frame)
+        except Exception as e:
+            print(f"[DEBUG] Error en detección previa local: {e}")
+            return True  # En caso de error, permitir el flujo normal
+    
     def process_register_frame(self, frame):
+        # Dibujar región guía donde debe posicionarse el rostro
+        self.draw_face_guide_region(frame)
+        
         cv2.putText(frame, "Presiona ESPACIO para registrar tu rostro", 
                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.putText(frame, "Mira directamente a la camara", 
+        cv2.putText(frame, "Posiciona tu rostro dentro del recuadro", 
                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         return frame
     
     def process_login_frame(self, frame):
-        detected_user = self.detect_and_recognize_face(frame)
+        """
+        Procesa frame en modo login con optimizaciones:
+        - Early exit si ya se concedió acceso
+        - Throttling (solo procesa cada 800ms)
+        - Flag de procesamiento (evita requests simultáneos)
+        - Detección previa local (solo envía si hay rostro)
+        - Procesamiento asíncrono (no bloquea el thread del video)
+        """
+        # Dibujar región guía donde debe posicionarse el rostro (siempre visible)
+        self.draw_face_guide_region(frame)
+        
+        # Early exit: Si ya se concedió acceso, no seguir procesando
+        if self.access_granted:
+            cv2.putText(frame, "Acceso concedido, procesando...", 
+                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            return frame
+        
+        # Verificar throttling: Solo procesar si pasó el intervalo desde el último request
+        current_time = time.time()
+        time_since_last_request = current_time - self.last_request_time
+        
+        if time_since_last_request < self.request_interval:
+            # Aún no ha pasado el tiempo mínimo, mostrar mensaje de espera
+            cv2.putText(frame, f"Analizando... ({int((self.request_interval - time_since_last_request) * 10) / 10}s)", 
+                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            return frame
+        
+        # Verificar si hay un request en proceso
+        if self.processing_request:
+            cv2.putText(frame, "Procesando reconocimiento...", 
+                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            return frame
+        
+        # Detección previa local: Solo enviar si hay un rostro visible en la región guía
+        if not self.has_face_in_frame(frame):
+            cv2.putText(frame, "Posiciona tu rostro dentro del recuadro", 
+                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
+            return frame
+        
+        # Todas las verificaciones pasaron: Procesar frame de forma asíncrona
+        self.processing_request = True
+        self.last_request_time = current_time
+        
+        # Mostrar mensaje en frame mientras procesa
+        cv2.putText(frame, "Verificando identidad...", 
+                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        
+        # Procesar en thread separado para no bloquear el video
+        def recognize_in_thread():
+            try:
+                detected_user = self.detect_and_recognize_face(frame.copy())
+                
+                # Actualizar UI en thread principal
+                self.root.after(0, lambda: self.handle_recognition_result(detected_user))
+            except Exception as e:
+                print(f"[ERROR] Error en reconocimiento asíncrono: {e}")
+                import traceback
+                traceback.print_exc()
+                # Liberar flag en caso de error
+                self.root.after(0, lambda: setattr(self, 'processing_request', False))
+        
+        recognition_thread = threading.Thread(target=recognize_in_thread, daemon=True)
+        recognition_thread.start()
+        
+        return frame
+    
+    def handle_recognition_result(self, detected_user):
+        """
+        Maneja el resultado del reconocimiento en el thread principal.
+        """
+        self.processing_request = False  # Liberar flag siempre
         
         if detected_user:
             user_id, similarity, other_similarities = detected_user
             
             print(f"[INFO] Usuario detectado: {user_id}, Similitud: {similarity:.2%}")
-            
-            # Show user info on frame
-            y_offset = 30
-            cv2.putText(frame, f"Usuario detectado: {user_id}", 
-                       (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-            y_offset += 30
-            cv2.putText(frame, f"Similitud: {similarity:.2%}", 
-                       (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            y_offset += 30
-            cv2.putText(frame, "ACCESO CONCEDIDO!", 
-                       (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 3)
-            
-            if other_similarities and len(other_similarities) > 0:
-                y_offset += 50
-                cv2.putText(frame, "Rostros similares:", 
-                           (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
-                
-                max_others = min(3, len(other_similarities))
-                for i in range(max_others):
-                    other_user, other_sim = other_similarities[i]
-                    if other_sim >= 0.05:
-                        y_offset += 25
-                        cv2.putText(frame, f"  {other_user}: {other_sim:.2%}", 
-                                   (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
             
             # Grant access immediately on first detection - stop camera and show alert
             if not self.access_granted:
@@ -456,21 +745,45 @@ class FaceRecognitionApp:
                     self.camera = None
                 # Show alert immediately (use after_idle to ensure it runs in main thread)
                 self.root.after_idle(lambda u=user_id, s=similarity, o=other_similarities: self.grant_access(u, s, o))
-        else:
-            cv2.putText(frame, "Rostro no reconocido", 
-                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        
-        return frame
     
     def detect_and_recognize_face(self, frame) -> Optional[Tuple[str, float, list]]:
         temp_file = None
         try:
-            # Save temp file in temp_images directory
+            # IMPORTANTE: Enviar toda la ROI (región guía) para consistencia con el registro
+            # Esto da más contexto a DeepFace y mejora la detección
+            height, width = frame.shape[:2]
+            roi_x = int(width * (self.face_roi_center_x - self.face_roi_width_ratio / 2))
+            roi_y = int(height * (self.face_roi_center_y - self.face_roi_height_ratio / 2))
+            roi_width = int(width * self.face_roi_width_ratio)
+            roi_height = int(height * self.face_roi_height_ratio)
+            
+            # Asegurar coordenadas válidas
+            roi_x = max(0, roi_x)
+            roi_y = max(0, roi_y)
+            roi_width = min(roi_width, width - roi_x)
+            roi_height = min(roi_height, height - roi_y)
+            
+            # Extraer toda la región de interés (con contexto completo)
+            roi_image = frame[roi_y:roi_y+roi_height, roi_x:roi_x+roi_width].copy()
+            
+            if roi_image.size == 0:
+                print("[DEBUG] ROI vacía")
+                return None
+            
+            # Asegurar tamaño mínimo para DeepFace
+            min_size = 300
+            if roi_image.shape[0] < min_size or roi_image.shape[1] < min_size:
+                scale = min_size / min(roi_image.shape[0], roi_image.shape[1])
+                new_width = int(roi_image.shape[1] * scale)
+                new_height = int(roi_image.shape[0] * scale)
+                roi_image = cv2.resize(roi_image, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
+            
+            # Save temp file con alta calidad
             temp_dir = Path("temp_images")
             temp_dir.mkdir(exist_ok=True)
             unique_id = str(uuid.uuid4())
             temp_file = str(temp_dir / f"temp_verify_{unique_id}.jpg")
-            cv2.imwrite(temp_file, frame)
+            cv2.imwrite(temp_file, roi_image, [cv2.IMWRITE_JPEG_QUALITY, 95])
             
             with open(temp_file, 'rb') as f:
                 files = {'file': ('frame.jpg', f, 'image/jpeg')}
@@ -481,34 +794,24 @@ class FaceRecognitionApp:
                 os.remove(temp_file)
             
             if response.status_code != 200:
-                print(f"[DEBUG] Response status: {response.status_code}")
                 return None
             
             data = response.json()
-            print(f"[DEBUG] Response data: {data}")
             
-            if not data.get('success'):
-                print(f"[DEBUG] Response not successful: {data}")
-                return None
-            
-            if not data.get('best_match'):
-                print(f"[DEBUG] No best match found")
+            if not data.get('success') or not data.get('best_match'):
                 return None
             
             best_match = data['best_match']
             threshold = data.get('threshold', self.threshold)
-            
-            print(f"[DEBUG] Best match: {best_match}, threshold: {threshold}")
             
             user_id = str(best_match['user_id'])
             similarity = float(best_match['similarity'])
             
             # Enforce minimum threshold - reject if below threshold
             if similarity < threshold:
-                print(f"[WARN] Similarity {similarity:.2%} below minimum threshold {threshold:.2%} (80%), rechazando el match")
                 return None
             
-            print(f"[DEBUG] User detected: {user_id}, similarity: {similarity:.2%} (above threshold {threshold:.2%})")
+            print(f"[INFO] Usuario reconocido: {user_id}, similitud: {similarity:.2%}")
             
             other_similarities = []
             for sim_data in data.get('other_similarities', []):
@@ -551,12 +854,50 @@ class FaceRecognitionApp:
         self.info_label.config(text="Extrayendo características faciales y guardando en base de datos...")
         self.root.update()
         
-        # Save temp file in temp_images directory
+        # SOLUCIÓN: Enviar toda la ROI (región guía) en lugar de recortar solo el rostro
+        # Esto da más contexto a DeepFace y mejora significativamente la detección
+        # DeepFace puede detectar y recortar el rostro automáticamente, pero necesita contexto suficiente
+        
+        height, width = frame.shape[:2]
+        roi_x = int(width * (self.face_roi_center_x - self.face_roi_width_ratio / 2))
+        roi_y = int(height * (self.face_roi_center_y - self.face_roi_height_ratio / 2))
+        roi_width = int(width * self.face_roi_width_ratio)
+        roi_height = int(height * self.face_roi_height_ratio)
+        
+        # Asegurar coordenadas válidas
+        roi_x = max(0, roi_x)
+        roi_y = max(0, roi_y)
+        roi_width = min(roi_width, width - roi_x)
+        roi_height = min(roi_height, height - roi_y)
+        
+        # Extraer toda la región de interés (con contexto completo)
+        roi_image = frame[roi_y:roi_y+roi_height, roi_x:roi_x+roi_width].copy()
+        
+        if roi_image.size == 0:
+            messagebox.showerror("Error", "No se pudo extraer la región de interés. Por favor, intenta nuevamente.")
+            self.capture_btn.config(state=NORMAL)
+            return
+        
+        # Verificar que hay un rostro en la ROI usando detección local (opcional, solo para feedback)
+        if not self.has_face_in_frame(frame):
+            messagebox.showwarning("Advertencia", "No se detectó rostro en la región guía. Se enviará de todas formas, pero asegúrate de posicionar tu rostro correctamente.")
+        
+        # Asegurar tamaño mínimo para DeepFace (mínimo 300x300 para mejor detección)
+        min_size = 300
+        if roi_image.shape[0] < min_size or roi_image.shape[1] < min_size:
+            scale = min_size / min(roi_image.shape[0], roi_image.shape[1])
+            new_width = int(roi_image.shape[1] * scale)
+            new_height = int(roi_image.shape[0] * scale)
+            roi_image = cv2.resize(roi_image, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
+        
+        # Save temp file con calidad alta (95% de calidad JPEG para preservar detalles)
         temp_dir = Path("temp_images")
         temp_dir.mkdir(exist_ok=True)
         unique_id = str(uuid.uuid4())
         temp_file = str(temp_dir / f"temp_register_{unique_id}.jpg")
-        cv2.imwrite(temp_file, frame)
+        
+        # Guardar con alta calidad para preservar detalles faciales
+        cv2.imwrite(temp_file, roi_image, [cv2.IMWRITE_JPEG_QUALITY, 95])
         
         user_id = self.current_user_id
         if not user_id:
@@ -667,31 +1008,39 @@ class FaceRecognitionApp:
             message += "\n"
         
         message += "Bienvenido al sistema.\n\n"
-        message += "La ventana se cerrará automáticamente."
+        # TEMPORAL: Comentado para pruebas - no cerrar la app
+        # message += "La ventana se cerrará automáticamente."
+        message += "Puedes intentar iniciar sesión nuevamente."
         
         # Show alert dialog
         messagebox.showinfo("🔐 Acceso Concedido", message)
         
+        # TEMPORAL: Comentado para pruebas - regresar al inicio en lugar de cerrar
         # Close the GUI window (but keep API server running)
-        print(f"[INFO] Cerrando ventana GUI...")
-        print(f"[INFO] El servidor API sigue ejecutándose en http://{self.api_base_url}")
-        print(f"[INFO] Puedes acceder a la API web en: http://{self.api_base_url}\n")
+        # print(f"[INFO] Cerrando ventana GUI...")
+        # print(f"[INFO] El servidor API sigue ejecutándose en http://{self.api_base_url}")
+        # print(f"[INFO] Puedes acceder a la API web en: http://{self.api_base_url}\n")
         
-        # Force close the GUI window - we're already in the main thread via after_idle
-        if self.root:
-            try:
-                # Stop the mainloop - this will cause mainloop() to return
-                self.root.quit()
-                print(f"[DEBUG] root.quit() called")
-            except Exception as e:
-                print(f"[DEBUG] Error in quit: {e}")
-            
-            try:
-                # Destroy the window
-                self.root.destroy()
-                print(f"[DEBUG] root.destroy() called")
-            except Exception as e:
-                print(f"[DEBUG] Error in destroy: {e}")
+        # TEMPORAL: En lugar de cerrar, regresar al inicio para poder probar de nuevo
+        print(f"[INFO] Acceso concedido - Regresando al inicio para pruebas...")
+        self.return_to_main()
+        
+        # TEMPORAL: Comentado - código original que cierra la aplicación
+        # # Force close the GUI window - we're already in the main thread via after_idle
+        # if self.root:
+        #     try:
+        #         # Stop the mainloop - this will cause mainloop() to return
+        #         self.root.quit()
+        #         print(f"[DEBUG] root.quit() called")
+        #     except Exception as e:
+        #         print(f"[DEBUG] Error in quit: {e}")
+        #     
+        #     try:
+        #         # Destroy the window
+        #         self.root.destroy()
+        #         print(f"[DEBUG] root.destroy() called")
+        #     except Exception as e:
+        #         print(f"[DEBUG] Error in destroy: {e}")
     
     def get_registered_users(self):
         try:
@@ -705,7 +1054,12 @@ class FaceRecognitionApp:
             return []
     
     def __del__(self):
-        self.stop_camera()
+        # Solo intentar detener la cámara si el objeto tkinter aún existe
+        try:
+            if hasattr(self, 'root') and self.root and self.root.winfo_exists():
+                self.stop_camera()
+        except:
+            pass  # Ignorar errores durante la destrucción
 
 def main():
     root = Tk()

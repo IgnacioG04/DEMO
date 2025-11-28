@@ -10,4 +10,8 @@ requests==2.31.0
 fastapi
 uvicorn
 python-multipart
+slowapi==0.1.9
+cachetools==5.3.2
+loguru==0.7.2
+psutil==5.9.6
 

@@ -24,7 +24,7 @@ if __name__ == "__main__":
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=8000,
+        port=int(API_PORT) if API_PORT else 8000,
         reload=True,  # Recarga automática durante desarrollo
         log_level="info"
     )

@@ -2,12 +2,29 @@
 API FastAPI para el sistema de reconocimiento facial
 """
 import os
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request
 from fastapi.responses import JSONResponse
 from pathlib import Path
 import uvicorn
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from face_recognition_system import FaceRecognitionSystem
 from dotenv import load_dotenv
+from health_check import get_health_status, is_live, is_ready
+from fastapi import status
+from logger_config import logger
+from validators import validate_uploaded_image, ValidationError
+from embeddings_cache import get_embeddings_cache
+from exceptions import (
+    FaceRecognitionException,
+    FaceNotFoundError,
+    InvalidImageError,
+    UserNotFoundError,
+    DuplicateUserError,
+    DatabaseError
+)
+import traceback
 
 # Load environment variables from .env file
 load_dotenv()
@@ -15,11 +32,98 @@ load_dotenv()
 API_PORT = int(os.getenv('API_PORT'))
 API_HOST = os.getenv('API_HOST')
 
+logger.info(f"Iniciando Sistema de Reconocimiento Facial API en {API_HOST}:{API_PORT}")
+
+# Configurar rate limiter
+limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="Sistema de Reconocimiento Facial", version="1.0.0")
+app.state.limiter = limiter
+
+# Handler personalizado para rate limit exceeded con logging
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    client_ip = get_remote_address(request)
+    endpoint = request.url.path
+    logger.warning(
+        f"Rate limit excedido",
+        extra={
+            "ip_address": client_ip,
+            "endpoint": endpoint,
+            "limit": str(exc.detail)
+        }
+    )
+    return _rate_limit_exceeded_handler(request, exc)
+
+app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
+
+# Handler global para excepciones personalizadas
+@app.exception_handler(FaceRecognitionException)
+async def face_recognition_exception_handler(request: Request, exc: FaceRecognitionException):
+    """
+    Handler global para excepciones personalizadas del sistema de reconocimiento facial
+    """
+    logger.warning(
+        f"Excepción capturada: {exc.__class__.__name__}",
+        extra={
+            "error_code": exc.error_code,
+            "message": exc.message,
+            "path": request.url.path,
+            "method": request.method
+        }
+    )
+    
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=exc.to_dict()
+    )
+
+# Handler global para errores no manejados
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """
+    Handler global para errores no manejados
+    """
+    logger.error(
+        f"Error no manejado: {exc.__class__.__name__}",
+        extra={
+            "error": str(exc),
+            "path": request.url.path,
+            "method": request.method
+        },
+        exc_info=True
+    )
+    
+    # En modo desarrollo, incluir más detalles
+    import os
+    is_development = os.getenv("ENVIRONMENT", "development").lower() == "development"
+    
+    error_detail = {
+        "error": "InternalServerError",
+        "message": "Error interno del servidor",
+        "code": "INTERNAL_SERVER_ERROR"
+    }
+    
+    if is_development:
+        error_detail["detail"] = str(exc)
+        error_detail["traceback"] = traceback.format_exc()
+    
+    return JSONResponse(
+        status_code=500,
+        content=error_detail
+    )
+
+logger.info("Rate limiting configurado")
+logger.info("Handlers de excepciones configurados")
 
 # Inicializar el sistema de reconocimiento facial
 # Threshold se carga automáticamente desde CONFIDENCE_INTERVAL en .env
+logger.info("Inicializando sistema de reconocimiento facial...")
 face_system = FaceRecognitionSystem()
+
+# Inicializar caché de embeddings (patrón Cache-Aside)
+logger.info("Inicializando caché de embeddings...")
+embeddings_cache = get_embeddings_cache()
+
+logger.info("Aplicación FastAPI inicializada correctamente")
 
 @app.get("/")
 async def read_root():
@@ -31,48 +135,153 @@ async def read_root():
             "register": "/register",
             "login": "/login",
             "users": "/users",
-            "verify-frame": "/verify-frame"
+            "verify-frame": "/verify-frame",
+            "health": "/health",
+            "health_live": "/health/live",
+            "health_ready": "/health/ready"
         },
         "docs": "/docs"
     })
 
 @app.post("/register")
-async def register_face(file: UploadFile = File(...), user_id: str = Form(...)):
-    # API endpoint to register a new face embedding - Stateless: saves image to registered_faces, checks DB, processes and stores
+@limiter.limit("5/minute")
+async def register_face(request: Request, file: UploadFile = File(...), user_id: str = Form(...)):
+    """
+    API endpoint to register a new face embedding
+    Stateless: saves image to registered_faces, checks DB, processes and stores
+    """
     try:
+        logger.info(
+            f"Recibida solicitud de registro",
+            extra={
+                "user_id": user_id,
+                "filename": file.filename,
+                "content_type": file.content_type
+            }
+        )
+        
         image_bytes = await file.read()
         
+        # Validar archivo antes de procesar (lanza excepciones si falla)
+        try:
+            metadata = validate_uploaded_image(
+                image_bytes,
+                filename=file.filename,
+                content_type=file.content_type
+            )
+            
+            # Agregar metadata al log
+            logger.info(
+                f"Archivo validado exitosamente",
+                extra={
+                    "user_id": user_id,
+                    **metadata
+                }
+            )
+        except (ValidationError, InvalidImageError) as e:
+            logger.warning(
+                f"Validación de archivo fallida",
+                extra={
+                    "user_id": user_id,
+                    "filename": file.filename,
+                    "error": e.message,
+                    "error_code": e.error_code
+                }
+            )
+            raise  # La excepción será manejada por el handler global
+        
+        # register_face ahora lanza excepciones directamente en lugar de retornar tuplas
         success, message = face_system.register_face(image_bytes, user_id)
         
         if success:
+            logger.info(
+                f"Usuario registrado exitosamente",
+                extra={"user_id": user_id}
+            )
             return JSONResponse({
                 "success": True,
                 "message": message
             })
         else:
-            raise HTTPException(status_code=400, detail=message)
+            # Si todavía retorna False (compatibilidad hacia atrás), crear excepción apropiada
+            logger.warning(
+                f"Error al registrar usuario: {message}",
+                extra={"user_id": user_id}
+            )
+            if "ya tiene embeddings" in message.lower() or "ya tiene una imagen" in message.lower():
+                raise DuplicateUserError(user_id, message)
+            elif "no se detectó" in message.lower() or "rostro" in message.lower():
+                raise FaceNotFoundError(message)
+            elif "base de datos" in message.lower() or "insertar" in message.lower():
+                raise DatabaseError(message)
+            elif "user_id debe ser" in message.lower() or "imagen está vacía" in message.lower():
+                raise ValidationError(message)
+            else:
+                raise ValidationError(message)
             
+    except FaceRecognitionException:
+        # Las excepciones personalizadas serán manejadas por el handler global
+        raise
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(
+            f"Error interno al registrar usuario",
+            extra={"user_id": user_id, "error": str(e)},
+            exc_info=True
+        )
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 @app.post("/login")
-async def login_face(file: UploadFile = File(...)):
-    # API endpoint to verify face identity for login - Stateless: processes image, compares with DB, returns result
+@limiter.limit("20/minute")
+async def login_face(request: Request, file: UploadFile = File(...)):
+    """
+    API endpoint to verify face identity for login
+    Stateless: processes image, compares with DB, returns result
+    """
     try:
+        logger.debug("Recibida solicitud de login/verificación")
         image_bytes = await file.read()
         
-        matches, user_id, similarity = face_system.verify_face(image_bytes)
+        # Validar archivo antes de procesar (lanza excepciones si falla)
+        try:
+            validate_uploaded_image(
+                image_bytes,
+                filename=file.filename,
+                content_type=file.content_type
+            )
+        except (ValidationError, InvalidImageError) as e:
+            logger.warning(
+                f"Validación de archivo fallida en login",
+                extra={
+                    "filename": file.filename,
+                    "error": e.message,
+                    "error_code": e.error_code
+                }
+            )
+            raise  # La excepción será manejada por el handler global
+        
+        matches, user_id_match, similarity = face_system.verify_face(image_bytes)
         
         if matches:
+            logger.info(
+                f"Login exitoso",
+                extra={
+                    "user_id": user_id_match,
+                    "similarity": float(similarity)
+                }
+            )
             return JSONResponse({
                 "success": True,
-                "user_id": user_id,
+                "user_id": user_id_match,
                 "similarity": float(similarity),
                 "message": "Rostro reconocido correctamente"
             })
         else:
+            logger.warning(
+                f"Login fallido - rostro no reconocido",
+                extra={"similarity": float(similarity) if similarity else 0.0}
+            )
             return JSONResponse({
                 "success": False,
                 "similarity": float(similarity) if similarity else 0.0,
@@ -80,10 +289,16 @@ async def login_face(file: UploadFile = File(...)):
             }, status_code=401)
             
     except Exception as e:
+        logger.error(
+            "Error interno en login",
+            extra={"error": str(e)},
+            exc_info=True
+        )
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 @app.get("/users")
-async def list_users():
+@limiter.limit("10/minute")
+async def list_users(request: Request):
     # API endpoint to list all registered users
     """
     Endpoint para listar todos los usuarios registrados
@@ -97,11 +312,88 @@ async def list_users():
         "count": len(users)
     })
 
+@app.get("/health")
+async def health_check(request: Request):
+    """
+    Health check completo del sistema
+    
+    Returns:
+        Estado de salud completo con todas las verificaciones
+    """
+    health_status = get_health_status(embeddings_cache)
+    
+    # Determinar código HTTP según estado
+    if health_status["status"] == "healthy":
+        status_code = status.HTTP_200_OK
+    elif health_status["status"] == "degraded":
+        status_code = status.HTTP_200_OK  # Aún funciona, solo con advertencias
+    else:  # unhealthy
+        status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    
+    return JSONResponse(
+        content=health_status,
+        status_code=status_code
+    )
+
+@app.get("/health/live")
+async def health_live(request: Request):
+    """
+    Liveness check - verifica que el servidor esté respondiendo
+    Siempre retorna OK mientras el servidor esté corriendo
+    
+    Returns:
+        Estado de liveness
+    """
+    return JSONResponse(content=is_live())
+
+@app.get("/health/ready")
+async def health_ready(request: Request):
+    """
+    Readiness check - verifica que el sistema esté listo para recibir requests
+    Requiere que los servicios críticos (BD) estén disponibles
+    
+    Returns:
+        Estado de readiness
+    """
+    ready_status = is_ready(embeddings_cache)
+    
+    # Retornar 503 si no está ready
+    if ready_status["status"] == "ready":
+        return JSONResponse(content=ready_status)
+    else:
+        return JSONResponse(
+            content=ready_status,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE
+        )
+
 @app.post("/verify-frame")
-async def verify_frame(file: UploadFile = File(...)):
-    # API endpoint for real-time frame verification - Stateless: processes frame, compares with DB, returns all similarities
+@limiter.limit("30/minute")
+async def verify_frame(request: Request, file: UploadFile = File(...)):
+    """
+    API endpoint for real-time frame verification
+    Stateless: processes frame, compares with DB, returns all similarities
+    """
     try:
+        logger.debug("Recibida solicitud de verificación de frame")
         image_bytes = await file.read()
+        
+        # Validar archivo antes de procesar (lanza excepciones si falla)
+        try:
+            validate_uploaded_image(
+                image_bytes,
+                filename=file.filename,
+                content_type=file.content_type
+            )
+        except (ValidationError, InvalidImageError) as e:
+            logger.warning(
+                f"Validación de archivo fallida en verify-frame",
+                extra={
+                    "filename": file.filename,
+                    "error": e.message,
+                    "error_code": e.error_code
+                }
+            )
+            raise  # La excepción será manejada por el handler global
         
         temp_file = None
         try:
@@ -118,23 +410,75 @@ async def verify_frame(file: UploadFile = File(...)):
             embedding = face_system._extract_face_embedding(str(temp_file))
             
             if embedding is None:
+                raise FaceNotFoundError("No se detectó rostro en la imagen")
+            
+            # Usar caché con fallback a BD (patrón Cache-Aside)
+            from embeddings_cache import get_all_embeddings_with_cache
+            all_embeddings = get_all_embeddings_with_cache()
+            
+            if not all_embeddings:
+                return JSONResponse({
+                    "success": True,
+                    "best_match": None,
+                    "all_similarities": [],
+                    "other_similarities": [],
+                    "threshold": float(face_system.threshold),
+                    "message": "No hay usuarios registrados"
+                })
+            
+            # Usar vectorización NumPy para comparar todos simultáneamente (MUCHO más rápido)
+            similarities_array, user_ids = face_system.calculate_similarities_vectorized(
+                embedding, all_embeddings
+            )
+            
+            # Validar que tenemos resultados
+            if len(similarities_array) == 0 or len(user_ids) == 0:
+                logger.warning("No se pudieron calcular similitudes - arrays vacíos")
+                return JSONResponse({
+                    "success": True,
+                    "best_match": None,
+                    "all_similarities": [],
+                    "other_similarities": [],
+                    "threshold": float(face_system.threshold),
+                    "message": "No se pudieron calcular similitudes"
+                })
+            
+            # Validar que los arrays tienen la misma longitud
+            if len(similarities_array) != len(user_ids):
+                logger.error(
+                    f"Longitud inconsistente: similarities={len(similarities_array)}, user_ids={len(user_ids)}"
+                )
                 return JSONResponse({
                     "success": False,
-                    "similarities": [],
-                    "message": "No se detectó rostro en la imagen"
-                })
+                    "error": "Error al calcular similitudes: arrays inconsistentes"
+                }, status_code=500)
             
-            from database import Database
-            all_embeddings = Database.get_all_embeddings()
-            
+            # Crear lista de resultados directamente desde arrays
             similarities = []
-            for embedding_id, user_id, stored_embedding, created_at in all_embeddings:
-                similarity = face_system.calculate_similarity(embedding, stored_embedding)
-                similarities.append({
-                    "user_id": str(user_id),
-                    "similarity": float(similarity)
+            for uid, sim in zip(user_ids, similarities_array):
+                try:
+                    similarity_float = float(sim)
+                    # Validar que la similitud está en rango válido [-1, 1]
+                    if not (-1.0 <= similarity_float <= 1.0):
+                        logger.warning(f"Similitud fuera de rango para usuario {uid}: {similarity_float}")
+                        similarity_float = max(-1.0, min(1.0, similarity_float))  # Clamp
+                    similarities.append({"user_id": uid, "similarity": similarity_float})
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Error al convertir similitud para usuario {uid}: {e}, valor: {sim}")
+                    continue
+            
+            if not similarities:
+                logger.warning("No se pudieron crear similitudes válidas")
+                return JSONResponse({
+                    "success": True,
+                    "best_match": None,
+                    "all_similarities": [],
+                    "other_similarities": [],
+                    "threshold": float(face_system.threshold),
+                    "message": "No se pudieron crear similitudes válidas"
                 })
             
+            # Ordenar por similitud descendente
             similarities.sort(key=lambda x: x["similarity"], reverse=True)
             
             best_match = similarities[0] if similarities else None
@@ -155,11 +499,20 @@ async def verify_frame(file: UploadFile = File(...)):
                 except:
                     pass
                     
+    except FaceNotFoundError as e:
+        logger.warning(f"Rostro no detectado en verify-frame: {e}")
+        raise  # Será manejado por el handler global
     except Exception as e:
+        logger.error(
+            "Error interno en verify-frame",
+            extra={"error": str(e), "error_type": type(e).__name__},
+            exc_info=True
+        )
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 def start_server():
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    logger.info(f"Iniciando servidor uvicorn en {API_HOST}:{API_PORT}")
+    uvicorn.run(app, host="0.0.0.0", port=int(API_PORT), log_level="info")
 
 def start_gui():
     import time
@@ -178,8 +531,8 @@ def start_gui():
         root.protocol("WM_DELETE_WINDOW", on_closing)
         root.mainloop()
     except Exception as e:
-        print(f"[ERROR] No se pudo iniciar la GUI: {e}")
-        print(f"[INFO] El servidor API sigue ejecutándose en http://{API_HOST}:{API_PORT}")
+        logger.error(f"No se pudo iniciar la GUI: {e}", exc_info=True)
+        logger.info(f"El servidor API sigue ejecutándose en http://{API_HOST}:{API_PORT}")
 
 if __name__ == "__main__":
     import threading
@@ -187,8 +540,8 @@ if __name__ == "__main__":
     server_thread = threading.Thread(target=start_server, daemon=True)
     server_thread.start()
     
-    print(f"[INFO] Servidor API iniciando en http://{API_HOST}:{API_PORT}")
-    print("[INFO] Abriendo aplicación GUI...")
+    logger.info(f"Servidor API iniciando en http://{API_HOST}:{API_PORT}")
+    logger.info("Abriendo aplicación GUI...")
     
     start_gui()
 
