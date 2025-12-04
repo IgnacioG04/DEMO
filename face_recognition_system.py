@@ -3,19 +3,27 @@ Sistema de reconocimiento facial ligero y preciso
 Usa DeepFace para reconocimiento facial eficiente
 """
 import os
-import numpy as np
 import uuid
 import traceback
 from pathlib import Path
 from typing import Optional, Tuple, List
 from datetime import datetime
+
+import cv2
+import numpy as np
 from deepface import DeepFace
-from database import Database
 from dotenv import load_dotenv
+
+from database import Database
 from embeddings_cache import get_all_embeddings_with_cache, clear_embeddings_cache
-from exceptions import FaceNotFoundError, DatabaseError, DuplicateUserError, UserNotFoundError, ValidationError
+from exceptions import (
+    FaceNotFoundError,
+    DatabaseError,
+    DuplicateUserError,
+    UserNotFoundError,
+    ValidationError,
+)
 from logger_config import logger
-from typing import List
 
 # Load environment variables
 load_dotenv()
@@ -43,36 +51,36 @@ class FaceRecognitionSystem:
         # El sistema intentará usar estos detectores en orden de preferencia
         
         # Verificar disponibilidad de detectores y configurar en orden de preferencia
-        self.backend = 'opencv'  # Por defecto seguro (siempre disponible)
-        
-        # Verificar RetinaFace (más preciso)
-        try:
-            import tensorflow as tf
-            # Verificar si tensorflow está disponible
-            if hasattr(tf, '__version__') and tf.__version__.startswith('2.'):
-                try:
-                    # Intentar importar retina-face
-                    import retinaface
-                    self.backend = 'retinaface'  # DeepFace espera minúsculas
-                    logger.info("✅ RetinaFace disponible - usando como detector (máxima precisión)")
-                except ImportError:
-                    # RetinaFace no instalado, verificar MTCNN
-                    try:
-                        import mtcnn
-                        self.backend = 'mtcnn'
-                        logger.info("✅ MTCNN disponible - usando como detector (RetinaFace no instalado)")
-                    except ImportError:
-                        logger.info("⚠️  RetinaFace y MTCNN no instalados - usando opencv")
-                        logger.info("💡 Para mejor precisión, instala: pip install retina-face  (o: pip install mtcnn)")
-        except ImportError:
-            # TensorFlow no disponible, verificar solo MTCNN
+        self.backend = None  # se asignará al primer backend robusto disponible
+
+        # Intentar RetinaFace (mayor precisión)
+        if self.backend is None:
             try:
-                import mtcnn
-                self.backend = 'mtcnn'
-                logger.info("✅ MTCNN disponible - usando como detector")
+                import tensorflow as tf  # noqa: F401
+                import retinaface  # noqa: F401
+
+                self.backend = 'retinaface'
+                logger.info("✅ RetinaFace disponible - usando como detector (máxima precisión)")
             except ImportError:
-                logger.info("⚠️  RetinaFace y MTCNN no disponibles - usando opencv")
-                logger.info("💡 Para mejor precisión, instala: pip install retina-face  (o: pip install mtcnn)")
+                logger.info("RetinaFace no disponible - buscando alternativas (instala 'retina-face' y 'tensorflow>=2')")
+
+        # Intentar MTCNN como fallback robusto
+        if self.backend is None:
+            try:
+                import mtcnn  # noqa: F401
+
+                self.backend = 'mtcnn'
+                logger.info("✅ MTCNN disponible - usando como detector (fallback)")
+            except ImportError:
+                logger.warning("MTCNN no disponible - considera instalar 'mtcnn' para mejor precisión")
+
+        # Último recurso: OpenCV (menos robusto)
+        if self.backend is None:
+            self.backend = 'opencv'
+            logger.warning(
+                "⚠️ RetinaFace/MTCNN no disponibles. Usando OpenCV (precisión reducida). "
+                "Instala 'retina-face' o 'mtcnn' para mejorar el reconocimiento."
+            )
         
         # Modelo: ArcFace ofrece la mejor precisión para verificación
         # Si ArcFace no está disponible, usar VGG-Face (muy preciso también)
@@ -137,6 +145,35 @@ class FaceRecognitionSystem:
             print(f"[ERROR] Error al guardar imagen temporal: {e}")
             traceback.print_exc()
             return None
+
+    def _preprocess_image(self, image_path: str) -> Optional[str]:
+        """
+        Aplica normalización de iluminación y contraste para reducir variaciones de fondo.
+        Devuelve la ruta a la imagen temporal preprocesada o None si no se pudo procesar.
+        """
+        try:
+            img = cv2.imread(image_path)
+            if img is None:
+                return None
+
+            # Normalización de histograma (espacio YUV)
+            img_yuv = cv2.cvtColor(img, cv2.COLOR_BGR2YUV)
+            img_yuv[:, :, 0] = cv2.equalizeHist(img_yuv[:, :, 0])
+            img_norm = cv2.cvtColor(img_yuv, cv2.COLOR_YUV2BGR)
+
+            # CLAHE para contraste local adaptativo
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            img_yuv = cv2.cvtColor(img_norm, cv2.COLOR_BGR2YUV)
+            img_yuv[:, :, 0] = clahe.apply(img_yuv[:, :, 0])
+            img_processed = cv2.cvtColor(img_yuv, cv2.COLOR_YUV2BGR)
+
+            processed_path = f"{image_path}_preprocessed.jpg"
+            cv2.imwrite(processed_path, img_processed, [cv2.IMWRITE_JPEG_QUALITY, 95])
+
+            return processed_path
+        except Exception as e:
+            logger.warning(f"No se pudo preprocesar la imagen para mejorar invarianza al fondo: {e}")
+            return None
     
     def _extract_face_embedding(self, image_path: str) -> Optional[np.ndarray]:
         """
@@ -154,21 +191,56 @@ class FaceRecognitionSystem:
         Returns:
             Embedding facial normalizado o None si no se detecta rostro
         """
+        processed_path = None
         try:
             # Verificar que el archivo existe
             if not os.path.exists(image_path):
                 logger.error(f"Archivo de imagen no existe: {image_path}")
                 return None
+
+            processed_path = self._preprocess_image(image_path)
+            image_path_to_use = processed_path or image_path
             
-            # DeepFace representa el rostro como embedding con configuración optimizada
-            embedding_obj = DeepFace.represent(
-                img_path=image_path,
-                model_name=self.model_name,  # ArcFace o VGG-Face (alta precisión)
-                detector_backend=self.backend,  # RetinaFace o MTCNN (robusto)
-                align=self.align_faces,  # True: alineación facial para corregir poses
-                enforce_detection=self.enforce_detection,  # True: requiere rostro válido
-                normalization='base'  # Normalización base para embeddings
-            )
+            # Primer intento: usar imagen preprocesada (si existe)
+            try:
+                embedding_obj = DeepFace.represent(
+                    img_path=image_path_to_use,
+                    model_name=self.model_name,  # ArcFace o VGG-Face (alta precisión)
+                    detector_backend=self.backend,  # RetinaFace o MTCNN (robusto)
+                    align=self.align_faces,  # True: alineación facial para corregir poses
+                    enforce_detection=self.enforce_detection,  # True: requiere rostro válido
+                    normalization='base'  # Normalización base para embeddings
+                )
+            except ValueError as e:
+                error_msg = str(e)
+                # Si falló con la imagen preprocesada, intentar nuevamente con la imagen ORIGINAL
+                # y con enforce_detection desactivado para ser más tolerantes
+                if processed_path is not None and (
+                    "Face could not be detected" in error_msg
+                    or "No face detected" in error_msg.lower()
+                ):
+                    logger.warning(
+                        "No se detectó rostro en imagen preprocesada, reintentando con imagen original",
+                        extra={"image_path": image_path},
+                    )
+                    try:
+                        embedding_obj = DeepFace.represent(
+                            img_path=image_path,
+                            model_name=self.model_name,
+                            detector_backend=self.backend,
+                            align=self.align_faces,
+                            enforce_detection=False,  # fallback más tolerante
+                            normalization='base',
+                        )
+                    except Exception as e2:
+                        logger.error(
+                            f"Reintento con imagen original también falló: {e2}",
+                            exc_info=True,
+                        )
+                        raise e  # re-lanzar el error original para manejo homogéneo
+                else:
+                    # Cualquier otro ValueError se maneja más abajo
+                    raise
             
             if len(embedding_obj) == 0:
                 logger.warning("No se detectaron rostros en la imagen")
@@ -179,9 +251,10 @@ class FaceRecognitionSystem:
                 # Si hay múltiples rostros, usar el primero (DeepFace ya los ordena por tamaño/confianza)
             
             # Extraer el embedding (vector de características)
-            embedding = np.array(embedding_obj[0]['embedding'])
-            
-            # Normalizar el embedding para similitud coseno consistente
+            embedding = np.array(embedding_obj[0]['embedding'], dtype=np.float32)
+
+            # Normalización avanzada: centrar y aplicar norma L2
+            embedding = embedding - np.mean(embedding)
             embedding_norm = embedding / (np.linalg.norm(embedding) + 1e-10)
             
             logger.debug(f"Embedding extraído exitosamente: shape={embedding_norm.shape}, norm={np.linalg.norm(embedding_norm):.4f}")
@@ -203,6 +276,12 @@ class FaceRecognitionSystem:
         except Exception as e:
             logger.error(f"Error inesperado al extraer embedding: {e}", exc_info=True)
             raise FaceNotFoundError(f"Error al procesar la imagen: {str(e)}")
+        finally:
+            if processed_path and os.path.exists(processed_path):
+                try:
+                    os.remove(processed_path)
+                except OSError as cleanup_error:
+                    logger.warning(f"No se pudo eliminar imagen preprocesada temporal: {cleanup_error}")
     
     def calculate_similarity(self, embedding1: np.ndarray, embedding2: np.ndarray) -> float:
         # Calculate cosine similarity between two face embeddings
@@ -436,8 +515,11 @@ class FaceRecognitionSystem:
                 }
             )
             
-            # Verificar si supera el umbral
-            if best_similarity >= self.threshold:
+            image_quality = self._calculate_image_quality(temp_file)
+            adaptive_threshold = self._compute_adaptive_threshold(image_quality)
+
+            # Verificar si supera el umbral adaptativo
+            if best_similarity >= adaptive_threshold:
                 return True, best_match, best_similarity
             else:
                 return False, None, best_similarity
@@ -454,6 +536,44 @@ class FaceRecognitionSystem:
                     os.remove(temp_file)
                 except Exception as cleanup_error:
                     print(f"[WARN] No se pudo eliminar archivo temporal: {cleanup_error}")
+
+    def _calculate_image_quality(self, image_path: str) -> float:
+        """
+        Calcula un puntaje de calidad (0-1) basado en nitidez e iluminación.
+        """
+        try:
+            gray = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+            if gray is None:
+                return 1.0
+
+            laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+            brightness = np.mean(gray)
+
+            sharpness_score = min(1.0, laplacian_var / 1500.0)
+            brightness_score = min(1.0, max(0.1, brightness / 255.0))
+
+            quality = (sharpness_score * 0.7) + (brightness_score * 0.3)
+            return float(max(0.3, min(1.0, quality)))
+        except Exception as e:
+            logger.debug(f"No se pudo calcular calidad de imagen: {e}")
+            return 1.0
+
+    def _compute_adaptive_threshold(self, image_quality: float) -> float:
+        """
+        Ajusta el umbral de similitud según la calidad de la imagen.
+        """
+        adjustment = 0.12 * (1.0 - image_quality)
+        adaptive_threshold = self.threshold - adjustment
+        adaptive_threshold = max(0.6, min(self.threshold, adaptive_threshold))
+        logger.debug(
+            "Umbral adaptativo calculado",
+            extra={
+                "base_threshold": self.threshold,
+                "image_quality": image_quality,
+                "adaptive_threshold": adaptive_threshold,
+            },
+        )
+        return adaptive_threshold
     
     def list_registered_users(self) -> list:
         # List all registered user IDs from database

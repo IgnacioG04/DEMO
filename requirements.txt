@@ -14,4 +14,6 @@ slowapi==0.1.9
 cachetools==5.3.2
 loguru==0.7.2
 psutil==5.9.6
-
+rembg
+onnxruntime
+scipy==1.10.1
