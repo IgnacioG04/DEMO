@@ -193,7 +193,7 @@ face_system = FaceRecognitionSystem(threshold=0.6)
 
   - Servidor API FastAPI
   - Debe estar ejecutándose para que la GUI funcione
-  - Endpoints: `/register`, `/login`, `/verify-frame`, `/users`
+  - Endpoints: `/register`, `/verify-frame`
   - Procesa todas las solicitudes de reconocimiento facial
 
 - **`face_recognition_system.py`**:

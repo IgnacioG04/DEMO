@@ -32,12 +32,88 @@ load_dotenv()
 API_PORT = int(os.getenv('API_PORT'))
 API_HOST = os.getenv('API_HOST')
 
+# Load valid hosts configuration
+VALID_HOSTS_STR = os.getenv('VALID_HOSTS', '*').strip()
+VALID_HOSTS = [host.strip() for host in VALID_HOSTS_STR.split(',') if host.strip()]
+
 logger.info(f"Iniciando Sistema de Reconocimiento Facial API en {API_HOST}:{API_PORT}")
+if '*' in VALID_HOSTS:
+    logger.info("Host validation: Permitido para todos los hosts (*)")
+else:
+    logger.info(f"Host validation: Hosts permitidos: {', '.join(VALID_HOSTS)}")
 
 # Configurar rate limiter
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="Sistema de Reconocimiento Facial", version="1.0.0")
 app.state.limiter = limiter
+
+# Host validation middleware
+@app.middleware("http")
+async def validate_host_middleware(request: Request, call_next):
+    """
+    Middleware para validar que el Host del request esté en la lista de hosts permitidos
+    """
+    # Si está configurado como wildcard, permitir todos los hosts
+    if '*' in VALID_HOSTS:
+        return await call_next(request)
+    
+    # Obtener el Host del request
+    host_header = request.headers.get("host", "").lower()
+    
+    # Si no hay Host header, rechazar
+    if not host_header:
+        logger.warning(
+            "Request rechazado: Host header faltante",
+            extra={
+                "ip_address": get_remote_address(request),
+                "path": request.url.path,
+                "method": request.method
+            }
+        )
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": "Forbidden",
+                "message": "Host header is required",
+                "code": "MISSING_HOST_HEADER"
+            }
+        )
+    
+    # Normalizar host (remover puerto si está presente para comparación flexible)
+    # Permitir comparación con y sin puerto
+    host_without_port = host_header.split(':')[0]
+    is_valid = False
+    
+    for valid_host in VALID_HOSTS:
+        valid_host_normalized = valid_host.lower().strip()
+        valid_host_without_port = valid_host_normalized.split(':')[0]
+        
+        # Comparar con puerto completo o sin puerto
+        if host_header == valid_host_normalized or host_without_port == valid_host_without_port:
+            is_valid = True
+            break
+    
+    if not is_valid:
+        logger.warning(
+            "Request rechazado: Host no permitido",
+            extra={
+                "ip_address": get_remote_address(request),
+                "host": host_header,
+                "path": request.url.path,
+                "method": request.method,
+                "allowed_hosts": VALID_HOSTS
+            }
+        )
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": "Forbidden",
+                "message": f"Host '{host_header}' is not allowed",
+                "code": "INVALID_HOST"
+            }
+        )
+    
+    return await call_next(request)
 
 # Handler personalizado para rate limit exceeded con logging
 async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
@@ -113,6 +189,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 logger.info("Rate limiting configurado")
 logger.info("Handlers de excepciones configurados")
+logger.info("Middleware de validación de hosts configurado")
 
 # Inicializar el sistema de reconocimiento facial
 # Threshold se carga automáticamente desde CONFIDENCE_INTERVAL en .env
@@ -133,8 +210,6 @@ async def read_root():
         "version": "1.0.0",
         "endpoints": {
             "register": "/register",
-            "login": "/login",
-            "users": "/users",
             "verify-frame": "/verify-frame",
             "health": "/health",
             "health_live": "/health/live",
@@ -231,86 +306,6 @@ async def register_face(request: Request, file: UploadFile = File(...), user_id:
             exc_info=True
         )
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
-
-@app.post("/login")
-@limiter.limit("20/minute")
-async def login_face(request: Request, file: UploadFile = File(...)):
-    """
-    API endpoint to verify face identity for login
-    Stateless: processes image, compares with DB, returns result
-    """
-    try:
-        logger.debug("Recibida solicitud de login/verificación")
-        image_bytes = await file.read()
-        
-        # Validar archivo antes de procesar (lanza excepciones si falla)
-        try:
-            validate_uploaded_image(
-                image_bytes,
-                filename=file.filename,
-                content_type=file.content_type
-            )
-        except (ValidationError, InvalidImageError) as e:
-            logger.warning(
-                f"Validación de archivo fallida en login",
-                extra={
-                    "filename": file.filename,
-                    "error": e.message,
-                    "error_code": e.error_code
-                }
-            )
-            raise  # La excepción será manejada por el handler global
-        
-        matches, user_id_match, similarity = face_system.verify_face(image_bytes)
-        
-        if matches:
-            logger.info(
-                f"Login exitoso",
-                extra={
-                    "user_id": user_id_match,
-                    "similarity": float(similarity)
-                }
-            )
-            return JSONResponse({
-                "success": True,
-                "user_id": user_id_match,
-                "similarity": float(similarity),
-                "message": "Rostro reconocido correctamente"
-            })
-        else:
-            logger.warning(
-                f"Login fallido - rostro no reconocido",
-                extra={"similarity": float(similarity) if similarity else 0.0}
-            )
-            return JSONResponse({
-                "success": False,
-                "similarity": float(similarity) if similarity else 0.0,
-                "message": "Rostro no reconocido o no coincide con ningún usuario registrado"
-            }, status_code=401)
-            
-    except Exception as e:
-        logger.error(
-            "Error interno en login",
-            extra={"error": str(e)},
-            exc_info=True
-        )
-        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
-
-@app.get("/users")
-@limiter.limit("10/minute")
-async def list_users(request: Request):
-    # API endpoint to list all registered users
-    """
-    Endpoint para listar todos los usuarios registrados
-    
-    Returns:
-        Lista de usuarios registrados
-    """
-    users = face_system.list_registered_users()
-    return JSONResponse({
-        "users": users,
-        "count": len(users)
-    })
 
 @app.get("/health")
 async def health_check(request: Request):
@@ -512,7 +507,35 @@ async def verify_frame(request: Request, file: UploadFile = File(...)):
 
 def start_server():
     logger.info(f"Iniciando servidor uvicorn en {API_HOST}:{API_PORT}")
-    uvicorn.run(app, host="0.0.0.0", port=int(API_PORT), log_level="info")
+    try:
+        uvicorn.run(app, host="0.0.0.0", port=int(API_PORT), log_level="info")
+    except OSError as e:
+        if e.errno == 10048 or "Address already in use" in str(e) or "solo se permite un uso" in str(e):
+            logger.error(
+                f"❌ ERROR: El puerto {API_PORT} ya está en uso por otro proceso",
+                exc_info=False
+            )
+            logger.error(
+                f"💡 Soluciones:",
+                exc_info=False
+            )
+            logger.error(
+                f"   1. Cierra el proceso que está usando el puerto {API_PORT}",
+                exc_info=False
+            )
+            logger.error(
+                f"   2. O cambia el puerto en tu archivo .env (API_PORT=8002)",
+                exc_info=False
+            )
+            logger.error(
+                f"   3. Para encontrar el proceso: netstat -ano | findstr :{API_PORT}",
+                exc_info=False
+            )
+            logger.error(
+                f"   4. Para matar el proceso: taskkill /PID <PID> /F",
+                exc_info=False
+            )
+        raise
 
 def start_gui():
     import time

@@ -19,8 +19,9 @@ def check_server_ready(max_attempts=30, delay=0.5):
     check_url = f"http://{API_HOST}:{API_PORT}"
     for i in range(max_attempts):
         try:
-            response = requests.get(f"{check_url}/users", timeout=1)
-            if response.status_code in [200, 401, 404]:
+            # Use health/live endpoint instead of /users
+            response = requests.get(f"{check_url}/health/live", timeout=1)
+            if response.status_code == 200:
                 return True
         except:
             pass

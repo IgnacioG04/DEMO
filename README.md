@@ -105,6 +105,20 @@ DATABASE_PORT=3306
 DATABASE_USER=root
 DATABASE_PASSWORD=tu_contraseña
 DATABASE_SCHEMA=nombre_de_tu_base_de_datos
+
+# Configuración de API
+API_HOST=0.0.0.0
+API_PORT=8000
+
+# URL del microservicio externo NestJS para gestión de usuarios
+EXTERNAL_API_URL=http://localhost:5001/api
+
+# Validación de Hosts (opcional)
+# Permite todos los hosts (por defecto)
+VALID_HOSTS=*
+
+# O especifica hosts permitidos (separados por comas)
+# VALID_HOSTS=localhost:8000,127.0.0.1:8000,api.example.com
 ```
 
 6. **Crear la tabla en MySQL**:
@@ -231,32 +245,6 @@ curl -X POST "http://localhost:8000/register" \
 }
 ```
 
-### POST `/login`
-
-Verifica la identidad mediante reconocimiento facial. Compara con embeddings en la base de datos.
-
-**Parámetros**:
-
-- `file`: Archivo de imagen (multipart/form-data)
-
-**Ejemplo con curl**:
-
-```bash
-curl -X POST "http://localhost:8000/login" \
-  -F "file=@foto_verificacion.jpg"
-```
-
-**Respuesta exitosa**:
-
-```json
-{
-  "success": true,
-  "user_id": "1",
-  "similarity": 0.85,
-  "message": "Rostro reconocido correctamente"
-}
-```
-
 ### POST `/verify-frame`
 
 Endpoint para verificación en tiempo real. Retorna todas las similitudes ordenadas. Usado por la aplicación GUI.
@@ -280,24 +268,7 @@ Endpoint para verificación en tiempo real. Retorna todas las similitudes ordena
 }
 ```
 
-### GET `/users`
-
-Lista todos los usuarios registrados desde la base de datos.
-
-**Ejemplo con curl**:
-
-```bash
-curl -X GET "http://localhost:8000/users"
-```
-
-**Respuesta**:
-
-```json
-{
-  "users": ["1", "2", "3"],
-  "count": 3
-}
-```
+**Nota**: El endpoint `/users` ha sido movido al microservicio externo NestJS. Para listar usuarios, consulta `http://localhost:5001/api/users`.
 
 ## 🎛️ Configuración
 
@@ -325,6 +296,35 @@ DATABASE_USER=root
 DATABASE_PASSWORD=tu_contraseña
 DATABASE_SCHEMA=nombre_de_tu_base_de_datos
 ```
+
+### Configuración de Validación de Hosts
+
+Puedes restringir qué hosts pueden acceder a la API mediante la variable `VALID_HOSTS`:
+
+**Permitir todos los hosts (por defecto)**:
+
+```env
+VALID_HOSTS=*
+```
+
+**Permitir solo hosts específicos**:
+
+```env
+VALID_HOSTS=localhost:8000,127.0.0.1:8000
+```
+
+**Permitir múltiples hosts (separados por comas)**:
+
+```env
+VALID_HOSTS=api.example.com,localhost:8000,127.0.0.1:8000
+```
+
+**Notas**:
+
+- Si no se especifica `VALID_HOSTS`, por defecto se permite todos los hosts (`*`)
+- La validación compara el header `Host` de la petición HTTP
+- Si un host no está permitido, se retorna un error `403 Forbidden`
+- La comparación es flexible: `localhost:8000` coincide con `localhost` (sin puerto)
 
 ## 📦 Estructura del Proyecto
 
@@ -358,7 +358,7 @@ DATABASE_SCHEMA=nombre_de_tu_base_de_datos
 - **`main.py`**:
 
   - API FastAPI con endpoints REST
-  - Endpoints: `/register`, `/login`, `/verify-frame`, `/users`
+  - Endpoints: `/register`, `/verify-frame`
   - Interfaz web HTML integrada
   - Inicializa el sistema de reconocimiento facial
 
@@ -367,7 +367,7 @@ DATABASE_SCHEMA=nombre_de_tu_base_de_datos
   - Clase `FaceRecognitionSystem` - Lógica principal de reconocimiento
   - Extracción de embeddings usando DeepFace
   - Comparación de embeddings usando similitud coseno
-  - Métodos: `register_face()`, `verify_face()`, `list_registered_users()`
+  - Métodos: `register_face()`
   - No almacena archivos localmente, todo va a la base de datos
 
 - **`database.py`**:
@@ -454,7 +454,7 @@ El sistema utiliza una arquitectura **stateless** donde:
 
 ### Flujo de Login/Verificación
 
-1. **Cliente envía imagen** → Endpoint `/login` o `/verify-frame`
+1. **Cliente envía imagen** → Endpoint `/verify-frame`
 2. **API extrae embedding** → Usa DeepFace para generar vector de características
 3. **API consulta BD** → Obtiene todos los embeddings registrados
 4. **API compara** → Calcula similitud coseno con cada embedding

@@ -23,6 +23,17 @@ class FaceRecognitionApp:
         self.root.configure(bg='#f0f0f0')
         
         self.api_base_url = f"http://{os.getenv('API_HOST')}:{os.getenv('API_PORT')}"
+        # External NestJS microservice URL for user management
+        if os.getenv('EXTERNAL_API_URL'):
+            self.external_api_url = os.getenv('EXTERNAL_API_URL')
+            print(f"[INFO] Usando EXTERNAL_API_URL desde .env: {self.external_api_url}")
+        else:
+            # Build URL from MAIN_SOURCE_DATA_HOST and MAIN_SOURCE_DATA_PORT
+            host = os.getenv('MAIN_SOURCE_DATA_HOST', 'localhost')
+            port = os.getenv('MAIN_SOURCE_DATA_PORT', '5001')
+            self.external_api_url = f"http://{host}:{port}/usuario-face-embedding"
+            print(f"[INFO] Construyendo EXTERNAL_API_URL desde variables: {self.external_api_url}")
+            print(f"[INFO] MAIN_SOURCE_DATA_HOST={host}, MAIN_SOURCE_DATA_PORT={port}")
         # Load confidence interval from environment variable, default to 0.8
         self.threshold = float(os.getenv('CONFIDENCE_INTERVAL', '0.8'))
         self.detection_count_threshold = 5
@@ -72,7 +83,8 @@ class FaceRecognitionApp:
         
         for attempt in range(max_retries):
             try:
-                response = requests.get(f"{self.api_base_url}/users", timeout=2)
+                # Check health endpoint instead of /users
+                response = requests.get(f"{self.api_base_url}/health/live", timeout=2)
                 if response.status_code == 200:
                     print("[OK] Conexión con API establecida")
                     return
@@ -1043,14 +1055,38 @@ class FaceRecognitionApp:
         #         print(f"[DEBUG] Error in destroy: {e}")
     
     def get_registered_users(self):
+        """
+        Obtiene la lista de usuarios registrados desde el microservicio externo NestJS
+        """
         try:
-            response = requests.get(f"{self.api_base_url}/users", timeout=2)
+            # Construct full URL
+            users_url = f"{self.external_api_url}/users"
+            print(f"[DEBUG] Intentando conectar a: {users_url}")
+            
+            # Call external NestJS microservice with increased timeout
+            response = requests.get(users_url, timeout=5)
+            
             if response.status_code == 200:
                 data = response.json()
-                return data.get('users', [])
+                # External service returns: { users: string[], count: number }
+                users = data.get('data', {}).get('users', [])
+                print(f"[DEBUG] Usuarios obtenidos exitosamente: {len(users)} usuarios")
+                return users
+            else:
+                print(f"[WARN] Respuesta del servidor con código {response.status_code}: {response.text}")
+                return []
+        except requests.exceptions.ConnectionError as e:
+            print(f"[ERROR] No se pudo conectar al microservicio externo en {self.external_api_url}")
+            print(f"[ERROR] Verifica que el servicio NestJS esté ejecutándose y que la URL sea correcta")
+            print(f"[ERROR] Detalles: {e}")
+            return []
+        except requests.exceptions.Timeout as e:
+            print(f"[ERROR] Timeout al conectar con el microservicio externo en {self.external_api_url}")
+            print(f"[ERROR] El servicio puede estar lento o no disponible")
             return []
         except Exception as e:
-            print(f"[ERROR] Error al obtener usuarios: {e}")
+            print(f"[ERROR] Error al obtener usuarios desde microservicio externo: {e}")
+            print(f"[ERROR] URL intentada: {self.external_api_url}/users")
             return []
     
     def __del__(self):
